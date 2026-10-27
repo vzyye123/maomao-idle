@@ -2824,7 +2824,16 @@ function shutdown() {
     persistTimer = null;
   }
   flushPersistedState();
-  httpServer.close(() => process.exit(0));
+  // 必须先断开 Socket.IO 的长连接：只关 httpServer 的话 upgrade 连接不会自己结束，
+  // systemd 的 stop-sigterm 会一直等到超时（90s）再 SIGKILL，每次发布白停一分半。
+  try {
+    io.close();
+  } catch {}
+  try {
+    httpServer.close(() => process.exit(0));
+  } catch {}
+  // 兜底：无论还有没有挂住的 handle，3 秒内必定退出（状态已经落盘）
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 process.once("SIGINT", shutdown);
