@@ -285,6 +285,35 @@ function publicUser(player) {
   };
 }
 
+// 玩家公开资料（组队/好友/战利品面板里的头像+名字都靠这个视图）。
+// 前端 AvatarAndName 会校验 `data.uuid === 传入的 uuid` 才写缓存，所以这里必须返回「被查询的人」，不能返回自己。
+function publicProfileView(player, viewerUuid) {
+  const isSelf = player.uuid === viewerUuid;
+  return {
+    uuid: player.uuid,
+    name: player.name,
+    avatar: player.avatar,
+    title: player.title ?? null,
+    // 前端读的是小写 ironcat（`a.value.ironcat`），isIronCat 只给旧字段兼容
+    ironcat: false,
+    isIronCat: false,
+    isVisitor: false,
+    style: { currentAvatarBorder: null },
+    // 邮箱只给本人看，别人的资料里不出现
+    ...(isSelf ? { email: player.email } : {})
+  };
+}
+
+function profileMapPayload(uuidList, viewerUuid) {
+  const result = {};
+  for (const raw of uuidList) {
+    const uuid = typeof raw === "string" ? raw.trim() : "";
+    const target = uuid && players.get(uuid);
+    if (target) result[target.uuid] = publicProfileView(target, viewerUuid);
+  }
+  return result;
+}
+
 function getPlayer(req) {
   const token = parseCookies(req.headers.cookie).maomao_session;
   const session = token && sessions.get(token);
@@ -1054,8 +1083,23 @@ app.post("/api/gm/market/:tradeUuid/cancel", requireGM, (req, res) => {
   return ok(res, marketTradeView(trade, ""));
 });
 app.get("/api/app/version.check", (_req, res) => ok(res, { showUpdateLog: false, version: "local" }));
-app.get("/api/game/user/profile", requirePlayer, (req, res) => ok(res, { ...publicUser(req.player), style: { currentAvatarBorder: null } }));
-app.get("/api/game/user/batch_profile", requirePlayer, (_req, res) => ok(res, {}));
+app.get("/api/game/user/profile", requirePlayer, (req, res) => {
+  const uuid = typeof req.query.uuid === "string" ? req.query.uuid.trim() : "";
+  // 不带 uuid 时返回自己；带了就必须返回被查询的人，否则组队列表里队友名字会一直显示「加载中」
+  const target = uuid ? players.get(uuid) : req.player;
+  if (!target) return res.status(404).json({ code: 404, msg: "玩家不存在" });
+  return ok(res, publicProfileView(target, req.player.uuid));
+});
+// 前端 BatchAvatarAndName 用的是 POST { uuidList: [...] }，返回 { uuid: profile }
+app.post("/api/game/user/batch_profile", requirePlayer, (req, res) => {
+  const uuidList = Array.isArray(req.body?.uuidList) ? req.body.uuidList : [];
+  return ok(res, profileMapPayload(uuidList.slice(0, 200), req.player.uuid));
+});
+app.get("/api/game/user/batch_profile", requirePlayer, (req, res) => {
+  const raw = req.query.uuidList;
+  const uuidList = Array.isArray(raw) ? raw : typeof raw === "string" && raw ? raw.split(",") : [];
+  return ok(res, profileMapPayload(uuidList.slice(0, 200), req.player.uuid));
+});
 app.get("/api/game/user/online", requirePlayer, (req, res) => ok(res, { online: true, uuid: req.player.uuid }));
 app.post("/api/game/user/online", requirePlayer, (req, res) => ok(res, { online: true, uuid: req.player.uuid, fp: req.body?.fp || null }));
 app.post("/api/game/user/switch_account", requirePlayer, (_req, res) => ok(res, publicUser(req.player)));
@@ -1874,8 +1918,6 @@ function handleBattleRoomEvent(socket, event, data) {
     return;
   }
 
-  if (event === "battleRoom:rewardInfo") return emitSuccess(event, {});
-  if (event === "battleRoom:resetSelfBattleRewardInfo") return emitSuccess(event, {});
   if (event.startsWith("battle:") && player.battleInfo && room.status === "battling") {
     if (event === "battle:update") return emitSuccess(event, player.battleInfo);
     if (event === "battle:fullInfo") return emitSuccess(event, { battleInfo: player.battleInfo });
