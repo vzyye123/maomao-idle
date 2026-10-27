@@ -193,6 +193,8 @@ function normalizeStatus(status = {}) {
     exp -= statusExperienceThresholds[level];
     level += 1;
   }
+  // 战斗属性经验是小数（力量 0.28 / 耐力 0.09 等），累加会产生浮点尾巴，落盘前保留两位小数
+  exp = Math.round(exp * 100) / 100;
   return { ...status, level, exp, currentExp: exp, final: level, expMode: "level" };
 }
 
