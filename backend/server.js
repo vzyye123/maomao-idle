@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import express from "express";
 import { Server as SocketServer } from "socket.io";
-import { c as battleMonsterCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
+import { c as battleMonsterCatalog, f as farmingCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
 import { a as resourceCatalog } from "../pulled-frontend/_nuxt/game-json-resources-C7HDgHOG.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -329,6 +329,7 @@ function makePlayer(email, name, existingUuid, createdAt) {
     quests: [],
     questSeq: 0,
     questWindow: 0,
+    farmPlots: [],
     createdAt: createdAt || new Date().toISOString()
   };
   setGoldCount(player, 1000);
@@ -361,6 +362,7 @@ function playerPersistenceView(player) {
     quests: Array.isArray(player.quests) ? player.quests : [],
     questSeq: Number(player.questSeq) || 0,
     questWindow: Number(player.questWindow) || 0,
+    farmPlots: Array.isArray(player.farmPlots) ? player.farmPlots : [],
     createdAt: player.createdAt
   };
 }
@@ -390,7 +392,8 @@ function loadPersistentState() {
           marketProfile: saved.marketProfile && typeof saved.marketProfile === "object" ? saved.marketProfile : player.marketProfile,
           quests: Array.isArray(saved.quests) ? saved.quests : player.quests,
           questSeq: Number.isFinite(Number(saved.questSeq)) ? Number(saved.questSeq) : player.questSeq,
-          questWindow: Number.isFinite(Number(saved.questWindow)) ? Number(saved.questWindow) : player.questWindow
+          questWindow: Number.isFinite(Number(saved.questWindow)) ? Number(saved.questWindow) : player.questWindow,
+          farmPlots: Array.isArray(saved.farmPlots) ? saved.farmPlots : player.farmPlots
         });
         if (player.inventory?.gold?.count === undefined) setGoldCount(player, player.resources?.gold || 0);
       }
@@ -1087,7 +1090,10 @@ function characterInitData(player) {
     status: getPlayerStatus(player),
     guild: {},
     userStyle: { currentAvatarBorder: null },
-    villageBuildingInfo: {},
+    // 前端以数组消费：FarmingPlotCard 用 .some(e => e.type === "kittyHomeServiceCenter" && e.level >= 2)
+    // 判断是否显示「补种」开关，5430 处用 .find(e => e.type === "catVillageMonument") 算经验加成。
+    // 下发 {} 会抛 TypeError 并被 Vue 的 errorHandler 吞掉，整张田地卡片渲染成注释节点。
+    villageBuildingInfo: Array.isArray(player.villageBuildingInfo) ? player.villageBuildingInfo : [],
     uniqueFlag: player.uniqueFlag,
     sponsorPoint: 0,
     kittyExpedition: {},
@@ -1994,6 +2000,320 @@ function handleQuestEvent(socket, event, data) {
   return false;
 }
 
+// ── 种植（farm） ───────────────────────────────────────────────────────────────
+// 契约取自前端 farm store（index-CnYosZ2K.js @427442 起）：
+//   farm:plots                         -> farm:plots:success          { list: [plot] }
+//   farm:plot:unlock|plant|harvest|shovel|autoReplant|create
+//                                      -> farm:plot:*:success         { plot }
+//   farm:plot:*:fail                   -> { msg }        ← 字段名是 msg，不是 message
+// 前端按 plot.id 合并单条更新（f_()），因此 id 必须稳定；地块总数固定 9（前端 fl=9）。
+// 作物/肥料配置直接复用 game-jresource 的 farmingCatalog，不另建副本。
+const FARM_PLOT_COUNT = 9;
+const FARM_LEVEL_KEY = "farmingPlant";
+// 开垦基础成本，实际消耗 = count * min(5, plotIndex)，即第 1 块地免费。
+const FARM_UNLOCK_BASE_COST = [
+  { id: "gold", count: 200000 },
+  { id: "wood", count: 2000 },
+  { id: "stone", count: 1500 },
+  { id: "nutrientEssence", count: 2500 }
+];
+
+const farmCrops = new Map((farmingCatalog?.crops || []).map((crop) => [crop.seedId, crop]));
+const farmFertilizers = new Map((farmingCatalog?.fertilizers || []).map((item) => [item.id, item]));
+
+function farmResourceName(resourceId) {
+  return resourceCatalog?.[resourceId]?.name || resourceId;
+}
+
+function farmRandomInt(range = {}) {
+  const min = Math.floor(Number(range.min) || 0);
+  const max = Math.floor(Number(range.max) || min);
+  if (max <= min) return Math.max(0, min);
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+// 肥料效果换算与前端 Kh() 对齐：时长按 percent 连乘，异变率按 percentPoint 相加，产量按 percent 放大。
+function farmPlantPlan(seedId, fertilizers) {
+  const crop = farmCrops.get(seedId);
+  if (!crop) return null;
+  const allowed = crop.fertilizerIds?.length ? new Set(crop.fertilizerIds) : null;
+  const normalized = [];
+  for (const item of Array.isArray(fertilizers) ? fertilizers : []) {
+    if (!item?.id) continue;
+    if (allowed && !allowed.has(item.id)) continue;
+    const definition = farmFertilizers.get(item.id);
+    if (!definition) continue;
+    const maxStacks = Math.max(1, Number(definition.maxStacks) || 1);
+    normalized.push({ id: item.id, stacks: Math.min(Math.max(1, Math.floor(Number(item.stacks) || 1)), maxStacks) });
+  }
+  let growthSeconds = Math.max(1, Number(crop.baseGrowthSeconds) || 0);
+  let mutationChance = Number(crop.baseMutationChance) || 0;
+  let yieldPercent = 0;
+  for (const entry of normalized) {
+    for (const effect of farmFertilizers.get(entry.id)?.effects || []) {
+      if (effect.type === "shortenDuration") {
+        if (typeof effect.seconds === "number") growthSeconds = Math.max(1, growthSeconds - effect.seconds);
+        if (typeof effect.percent === "number") growthSeconds = Math.max(1, Math.floor(growthSeconds * (1 - effect.percent)));
+      } else if (effect.type === "increaseMutationChance" || effect.type === "adjustMutationChance") {
+        if (typeof effect.percentPoint === "number") mutationChance += effect.percentPoint;
+        if (typeof effect.multiply === "number") mutationChance *= effect.multiply;
+      } else if (effect.type === "increaseYield") {
+        if (typeof effect.percent === "number") yieldPercent += effect.percent;
+      }
+    }
+  }
+  return {
+    crop,
+    fertilizers: normalized,
+    growthSeconds,
+    mutationChance: Math.max(0, Math.min(1, mutationChance)),
+    yieldPercent
+  };
+}
+
+function farmPlantCosts(plan) {
+  const merged = new Map();
+  const add = (id, count) => {
+    const amount = Math.floor(Number(count) || 0);
+    if (!id || amount <= 0) return;
+    merged.set(id, (merged.get(id) || 0) + amount);
+  };
+  for (const item of plan.crop.plantCost || []) add(item.id, item.count);
+  for (const item of plan.fertilizers) add(item.id, item.stacks);
+  return [...merged.entries()].map(([id, count]) => ({ id, count }));
+}
+
+function farmRollYields(plan) {
+  const gained = {};
+  const add = (id, count) => {
+    const amount = Math.floor(Number(count) || 0);
+    if (!id || amount <= 0) return;
+    gained[id] = (gained[id] || 0) + amount;
+  };
+  for (const entry of plan.crop.yields || []) {
+    if (Math.random() > Math.min(1, Number(entry.percent ?? 1) || 0)) continue;
+    const base = entry.range ? farmRandomInt(entry.range) : Number(entry.count) || 0;
+    add(entry.id, Math.round(base * (1 + plan.yieldPercent)));
+  }
+  for (const entry of plan.crop.mutationYields || []) {
+    const chance = plan.mutationChance * (Number(entry.percent ?? 1) || 0);
+    if (Math.random() > chance) continue;
+    add(entry.id, entry.range ? farmRandomInt(entry.range) : Number(entry.count) || 1);
+  }
+  return gained;
+}
+
+function farmUnlockCost(plotIndex) {
+  const multiplier = Math.min(5, Math.max(0, Math.floor(Number(plotIndex) || 0)));
+  return FARM_UNLOCK_BASE_COST.map((item) => ({ id: item.id, count: Math.floor(item.count * multiplier) })).filter((item) => item.count > 0);
+}
+
+function farmEnsurePlots(player) {
+  if (!Array.isArray(player.farmPlots)) player.farmPlots = [];
+  return player.farmPlots;
+}
+
+function farmFindPlot(player, plotIndex) {
+  const index = Math.floor(Number(plotIndex));
+  if (!Number.isInteger(index)) return null;
+  return farmEnsurePlots(player).find((plot) => Number(plot.plotIndex) === index) || null;
+}
+
+function farmLevel(player) {
+  return normalizeStatus(player.status?.[FARM_LEVEL_KEY] || {}).level;
+}
+
+function farmAddExp(player, amount) {
+  const gained = Math.floor(Number(amount) || 0);
+  if (gained <= 0) return;
+  const status = player.status[FARM_LEVEL_KEY] || { level: 1, exp: 0, currentExp: 0 };
+  const currentExp = Number(status.currentExp ?? status.exp) || 0;
+  player.status[FARM_LEVEL_KEY] = normalizeStatus({ ...status, currentExp: currentExp + gained, exp: currentExp + gained });
+}
+
+// 成熟按时间惰性结算：读列表 / 收获前把到点的 GROWING 翻成 READY。
+function farmRefreshPlots(player) {
+  const now = Date.now();
+  let changed = false;
+  for (const plot of farmEnsurePlots(player)) {
+    if (plot.state !== "GROWING") continue;
+    const due = Date.parse(plot.expectedHarvestAt || "");
+    if (!Number.isFinite(due) || due > now) continue;
+    plot.state = "READY";
+    changed = true;
+  }
+  return changed;
+}
+
+function farmTakeCosts(player, costs) {
+  const missing = costs.filter((item) => getAssetCount(player, item.id) < item.count);
+  if (missing.length) return missing;
+  for (const item of costs) removeAsset(player, item.id, item.count);
+  return null;
+}
+
+function farmStartGrowing(plot, seedId, plan) {
+  const now = Date.now();
+  plot.state = "GROWING";
+  plot.seedId = seedId;
+  plot.fertilizers = plan.fertilizers;
+  plot.yieldMultiplier = plan.yieldPercent;
+  plot.mutationChance = plan.mutationChance;
+  plot.plantedAt = new Date(now).toISOString();
+  plot.expectedHarvestAt = new Date(now + plan.growthSeconds * 1000).toISOString();
+  plot.harvestAt = now + plan.growthSeconds * 1000;
+}
+
+// 字段形状对齐参考站：空值用 "" / 0，不用 null —— 前端 PlantedAt 分支按真值判断，但保持同一形状便于比对。
+function farmClearPlot(plot) {
+  plot.state = "EMPTY";
+  plot.seedId = "";
+  plot.plantedAt = "";
+  plot.expectedHarvestAt = "";
+  plot.harvestAt = 0;
+  plot.fertilizers = [];
+  plot.yieldMultiplier = 0;
+  plot.mutationChance = 0;
+}
+
+function farmSyncInventory(socket, changes) {
+  emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
+  emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+  const payload = {};
+  for (const [resourceId, delta] of Object.entries(changes || {})) {
+    if (!delta) continue;
+    payload[resourceId] = { count: delta };
+  }
+  if (Object.keys(payload).length) emitGameEvent(socket, "inventoryModify", payload);
+}
+
+function handleFarmEvent(socket, event, data) {
+  const player = socket.player;
+  if (!player) return true;
+  farmEnsurePlots(player);
+  const payload = data && typeof data === "object" ? data : {};
+  const fail = (message) => {
+    emitGameEvent(socket, `${event}:fail`, { msg: message });
+    return true;
+  };
+
+  if (event === "farm:plots") {
+    const changed = farmRefreshPlots(player);
+    const area = payload.area ? String(payload.area) : "";
+    const list = player.farmPlots
+      .filter((plot) => !area || plot.area === area)
+      .sort((left, right) => String(left.area || "").localeCompare(String(right.area || "")) || Number(left.plotIndex) - Number(right.plotIndex));
+    emitGameEvent(socket, "farm:plots:success", { list });
+    if (changed) schedulePersist();
+    return true;
+  }
+
+  if (event === "farm:plot:unlock" || event === "farm:plot:create") {
+    let plotIndex = Math.floor(Number(payload.plotIndex));
+    if (!Number.isInteger(plotIndex) || plotIndex < 0) {
+      if (event === "farm:plot:create") {
+        const used = new Set(player.farmPlots.map((plot) => Number(plot.plotIndex)));
+        plotIndex = [...Array(FARM_PLOT_COUNT).keys()].find((index) => !used.has(index)) ?? -1;
+      }
+    }
+    if (!Number.isInteger(plotIndex) || plotIndex < 0 || plotIndex >= FARM_PLOT_COUNT) return fail("田地编号无效");
+    if (farmFindPlot(player, plotIndex)) return fail("该田地已经开垦");
+    const costs = farmUnlockCost(plotIndex);
+    const missing = farmTakeCosts(player, costs);
+    if (missing) return fail(`资源不足：${missing.map((item) => `${farmResourceName(item.id)} x${item.count}`).join("、")}`);
+    const plot = {
+      id: plotIndex + 1,
+      area: "default",
+      plotIndex,
+      state: "EMPTY",
+      seedId: "",
+      autoReplant: false,
+      plantedAt: "",
+      expectedHarvestAt: "",
+      harvestAt: 0,
+      fertilizers: [],
+      yieldMultiplier: 0,
+      mutationChance: 0
+    };
+    player.farmPlots.push(plot);
+    emitGameEvent(socket, `${event}:success`, { plot: { ...plot } });
+    farmSyncInventory(socket, Object.fromEntries(costs.map((item) => [item.id, -item.count])));
+    schedulePersist();
+    return true;
+  }
+
+  if (event === "farm:plot:plant") {
+    const plot = farmFindPlot(player, payload.plotIndex);
+    if (!plot) return fail("该田地尚未开垦");
+    if (plot.state === "GROWING") return fail("田地正在生长中");
+    if (plot.state === "READY") return fail("作物已成熟，请先收获");
+    const seedId = String(payload.seedId || "");
+    const plan = farmPlantPlan(seedId, payload.fertilizers);
+    if (!plan) return fail("未知的种子");
+    const level = farmLevel(player);
+    const required = Number(plan.crop.farmingPlantLevelRequired) || 0;
+    if (level < required) return fail(`种植等级不足：需要 ${required} 级，当前 ${level} 级`);
+    const costs = farmPlantCosts(plan);
+    const missing = farmTakeCosts(player, costs);
+    if (missing) return fail(`资源不足：${missing.map((item) => `${farmResourceName(item.id)} x${item.count}`).join("、")}`);
+    farmStartGrowing(plot, seedId, plan);
+    emitGameEvent(socket, "farm:plot:plant:success", { plot: { ...plot } });
+    farmSyncInventory(socket, Object.fromEntries(costs.map((item) => [item.id, -item.count])));
+    schedulePersist();
+    return true;
+  }
+
+  if (event === "farm:plot:harvest") {
+    const plot = farmFindPlot(player, payload.plotIndex);
+    if (!plot) return fail("该田地尚未开垦");
+    farmRefreshPlots(player);
+    if (plot.state !== "READY") return fail("作物尚未成熟");
+    const plan = farmPlantPlan(plot.seedId, plot.fertilizers);
+    if (!plan) return fail("作物数据异常，无法收获");
+    const changes = {};
+    for (const [resourceId, count] of Object.entries(farmRollYields(plan))) {
+      addAsset(player, resourceId, count);
+      changes[resourceId] = count;
+    }
+    farmAddExp(player, plan.crop.farmingPlantExpGainWhenHarvest);
+    // 开启补种时按原种子/肥料配置尝试续种，种子或肥料不足则只清空田地。
+    const replantCosts = plot.autoReplant ? farmPlantCosts(plan) : null;
+    const replantMissing = replantCosts ? farmTakeCosts(player, replantCosts) : null;
+    if (replantCosts && !replantMissing) {
+      for (const item of replantCosts) changes[item.id] = (changes[item.id] || 0) - item.count;
+      farmStartGrowing(plot, plot.seedId, plan);
+    } else {
+      farmClearPlot(plot);
+    }
+    emitGameEvent(socket, "farm:plot:harvest:success", { plot: { ...plot } });
+    farmSyncInventory(socket, changes);
+    emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(player).status);
+    schedulePersist();
+    return true;
+  }
+
+  if (event === "farm:plot:shovel") {
+    const plot = farmFindPlot(player, payload.plotIndex);
+    if (!plot) return fail("该田地尚未开垦");
+    if (plot.state === "EMPTY") return fail("该田地没有作物");
+    farmClearPlot(plot);
+    emitGameEvent(socket, "farm:plot:shovel:success", { plot: { ...plot } });
+    schedulePersist();
+    return true;
+  }
+
+  if (event === "farm:plot:autoReplant") {
+    const plot = farmFindPlot(player, payload.plotIndex);
+    if (!plot) return fail("该田地尚未开垦");
+    plot.autoReplant = Boolean(payload.value);
+    emitGameEvent(socket, "farm:plot:autoReplant:success", { plot: { ...plot } });
+    schedulePersist();
+    return true;
+  }
+
+  return false;
+}
+
 function applyActionImprovements(player, actionId) {
   let updated = false;
   for (const improvement of actionImprovements[actionId] || []) {
@@ -2093,15 +2413,20 @@ function startTaskRunner(socket) {
   runTaskQueue(socket);
 }
 
-// 在线玩家每分钟巡检一次任务窗口：跨过 4 小时档位就补一份新任务并推送。
+// 在线玩家每分钟巡检：跨过 4 小时档位就补一份新任务、把到点的作物翻成可收获，并推送。
 setInterval(() => {
   let changed = false;
   for (const socket of io.sockets.sockets.values()) {
     const player = socket.player;
     if (!player) continue;
-    if (!syncQuests(player)) continue;
-    emitGameEvent(socket, "quest:list:success", player.quests);
-    changed = true;
+    if (syncQuests(player)) {
+      emitGameEvent(socket, "quest:list:success", player.quests);
+      changed = true;
+    }
+    if (farmRefreshPlots(player)) {
+      emitGameEvent(socket, "farm:plots:success", { list: player.farmPlots });
+      changed = true;
+    }
   }
   if (changed) schedulePersist();
 }, 60 * 1000);
@@ -2259,6 +2584,7 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
       return;
     }
+    if (event.startsWith("farm:") && handleFarmEvent(socket, event, data)) return;
     if (event.startsWith("quest:") && handleQuestEvent(socket, event, data)) return;
     const result = eventResult(event, socket.player, payload);
     emitGameEvent(socket, `${event}:success`, result);
