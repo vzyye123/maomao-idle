@@ -1704,17 +1704,48 @@ function rollBattleDrop(drop, multiplier) {
   return perRoll * times;
 }
 
+// ---- 装备属性加成 ----
+// 装备的效果写在资源表的 onEquip[].statusEffect 里（`{status, increase}` 或 `{status, decrease}`），
+// 例如斧头 attacking +1、铁剑 attacking +4、战士披风 battle +10、鱼鳞帽 hp +40。
+// 两个栏位各自独立：战斗读 battleEquipment，生活读 workEquipment（同一件装备不会两边同时生效）。
+// `hp` 是伪属性（加生命上限），`hpRegen` / `mpRegen` 是每回合回复量。
+function equipmentEffects(player, type) {
+  const slots = player[type === "battle" ? "battleEquipment" : "workEquipment"];
+  const bonus = {};
+  const regen = { hp: 0, mp: 0 };
+  if (!slots || typeof slots !== "object" || Array.isArray(slots)) return { bonus, regen };
+  for (const resourceId of Object.values(slots)) {
+    const item = resourceCatalog[resourceId];
+    if (!item) continue;
+    for (const effect of item.onEquip || []) {
+      for (const entry of effect?.statusEffect || []) {
+        const status = String(entry?.status || "");
+        if (!status) continue;
+        const amount = (Number(entry.increase) || 0) - (Number(entry.decrease) || 0);
+        if (!amount) continue;
+        bonus[status] = (bonus[status] || 0) + amount;
+      }
+      regen.hp += Number(effect?.hpRegen?.increase) || 0;
+      regen.mp += Number(effect?.mpRegen?.increase) || 0;
+    }
+  }
+  return { bonus, regen };
+}
+
 function makeBattleUnit(player) {
   const status = getPlayerStatus(player);
-  const strength = status.strength?.level || 1;
-  const stamina = status.stamina?.level || 1;
-  const intelligence = status.intelligence?.level || 1;
-  const dexterity = status.dexterity?.level || 1;
-  const battleLevel = status.battle?.level || 1;
-  const maxHp = 100 + stamina * 5;
+  const { bonus, regen } = equipmentEffects(player, "battle");
+  const bonusOf = (key) => Number(bonus[key]) || 0;
+  const strength = Math.max(1, (status.strength?.level || 1) + bonusOf("strength"));
+  const stamina = Math.max(1, (status.stamina?.level || 1) + bonusOf("stamina"));
+  const intelligence = Math.max(1, (status.intelligence?.level || 1) + bonusOf("intelligence"));
+  const dexterity = Math.max(1, (status.dexterity?.level || 1) + bonusOf("dexterity"));
+  const battleLevel = Math.max(1, (status.battle?.level || 1) + bonusOf("battle"));
+  const maxHp = 100 + stamina * 5 + bonusOf("hp");
   const maxMp = 50 + intelligence * 5;
-  const attacking = battleAttackValue(strength, battleLevel);
-  const defencing = battleDefenceValue(stamina, battleLevel);
+  // 攻击/防御是「力量/耐力换算值 + 装备直接加的攻击力」，两者都算
+  const attacking = roundOneDecimal(battleAttackValue(strength, battleLevel) + bonusOf("attacking"));
+  const defencing = roundOneDecimal(battleDefenceValue(stamina, battleLevel) + bonusOf("defencing"));
   const battleStatus = {
     ...status,
     attacking: { level: attacking, currentExp: status.strength?.currentExp || 0 },
@@ -1722,8 +1753,15 @@ function makeBattleUnit(player) {
     dexterity: { level: dexterity, currentExp: status.dexterity?.currentExp || 0 },
     strength: { level: strength, currentExp: status.strength?.currentExp || 0 },
     intelligence: { level: intelligence, currentExp: status.intelligence?.currentExp || 0 },
-    stamina: { level: stamina, currentExp: status.stamina?.currentExp || 0 }
+    stamina: { level: stamina, currentExp: status.stamina?.currentExp || 0 },
+    battle: { level: battleLevel, currentExp: status.battle?.currentExp || 0 }
   };
+  // 其余属性（幸运等）直接按装备加成平移，战斗面板里显示的值要和实际生效值一致
+  for (const [key, amount] of Object.entries(bonus)) {
+    if (["hp", "attacking", "defencing", "strength", "stamina", "intelligence", "dexterity", "battle"].includes(key)) continue;
+    const current = battleStatus[key] || { level: 1 };
+    battleStatus[key] = { ...current, level: roundOneDecimal((Number(current.level) || 1) + amount) };
+  }
   return {
     uuid: player.uuid,
     id: player.uuid,
@@ -1746,10 +1784,12 @@ function makeBattleUnit(player) {
     skillOrder: ["baseAttack"],
     ai: {},
     skillColddown: {},
-    equipment: {},
+    equipment: { ...(player.battleEquipment || {}) },
     inventory: {},
     initialStates: [],
-    affix: []
+    affix: [],
+    // 装备提供的每回合回复量，在 resolveBattleTurn 里叠加到耐力/智力回复之上
+    equipRegen: regen
   };
 }
 
@@ -2048,10 +2088,13 @@ function resolveBattleTurn(room) {
   battleInfo.currentTurnIndex = (battleInfo.currentTurnIndex + 1) % Math.max(1, battleInfo.turnOrder.length);
   if (battleInfo.currentTurnIndex === 0) battleInfo.passedTurn += 1;
   // 回合开始回复：每 1 点耐力回复 0.1 生命，每 1 点智力回复 0.05 魔法（向下取整，参考站多数回合回复为 0）
+  // 装备的 hpRegen / mpRegen（生命披风 +5、法师披风 +8 这类）直接加在上面
   battleInfo.members.forEach((unit) => {
     if (!(unit.hp > 0)) return;
-    const hpRegen = Math.floor((Number(unit.status?.stamina?.level) || 1) * 0.1);
-    const mpRegen = Math.floor((Number(unit.status?.intelligence?.level) || 1) * 0.05);
+    const equipHpRegen = Math.floor(Number(unit.equipRegen?.hp) || 0);
+    const equipMpRegen = Math.floor(Number(unit.equipRegen?.mp) || 0);
+    const hpRegen = Math.floor((Number(unit.status?.stamina?.level) || 1) * 0.1) + equipHpRegen;
+    const mpRegen = Math.floor((Number(unit.status?.intelligence?.level) || 1) * 0.05) + equipMpRegen;
     if (hpRegen > 0) unit.hp = Math.min(unit.maxHp, unit.hp + hpRegen);
     if (mpRegen > 0) unit.mp = Math.min(unit.maxMp, unit.mp + mpRegen);
     if (hpRegen > 0) emitRoomEvent(room, "battle:heal:success", { source: unit.uuid, target: unit.uuid, value: hpRegen, reason: "turnRegen" });
