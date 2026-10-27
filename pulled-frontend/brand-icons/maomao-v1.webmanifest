@@ -1,0 +1,15 @@
+{
+  "name": "猫猫放置",
+  "short_name": "猫猫放置",
+  "lang": "zh-CN",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#234b27",
+  "icons": [
+    {"src": "/brand-icons/maomao-v1-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/brand-icons/maomao-v1-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}

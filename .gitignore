@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 运行时数据：accounts.json 含邮箱与密码 hash，players.json 含玩家存档
+backend/data/*
+!backend/data/.gitkeep
+
+# 本地环境变量
+.env
+.env.local
+
+# 日志
+*.log
+
+# 一次性脚本 / 抓包与调试产物
+.tmp/
+.playwright-cli/
+
+# 工作记忆（含服务器凭据）
+.workbuddy/
+
+# 本地截图与 playwright 快照
+real-home.png
+login.yaml

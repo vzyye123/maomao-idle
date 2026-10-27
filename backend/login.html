@@ -1,0 +1,121 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>🐱🐟猫猫放置 · 登录</title>
+  <style>
+    *{box-sizing:border-box}
+    html,body{width:100%;min-height:100%;margin:0}
+    body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#606266}
+    .login-card{width:392px;height:403px;padding:28px 26px 54px;border-radius:12px;background:#fff}
+    .login-card.registering{height:470px}
+    .title{margin:0;text-align:center;color:#111;font-size:22px;font-weight:700;line-height:28px}
+    .tabs{display:flex;height:40px;margin-top:22px;border-bottom:1px solid #e4e7ed}
+    .tab{position:relative;flex:1;border:0;background:transparent;color:#606266;font:inherit;font-size:14px;cursor:pointer}
+    .tab.active{color:#409eff}
+    .tab.active::after{position:absolute;right:0;bottom:-1px;left:0;height:2px;background:#409eff;content:""}
+    .form{padding-top:17px}
+    .login-card.registering .form{padding-top:18px}
+    .field{margin:0 0 11px}
+    .field label{display:block;margin-bottom:4px;color:#606266;font-size:12px;line-height:16px}
+    .field input{display:block;width:100%;height:36px;padding:0 11px;border:1px solid #dcdfe6;border-radius:6px;background:#fff;color:#606266;font:inherit;font-size:14px;outline:0;transition:border-color .2s}
+    .field input:focus{border-color:#409eff}
+    .submit{display:block;width:100%;height:40px;margin-top:18px;border:1px solid #409eff;border-radius:6px;background:#409eff;color:#fff;font:inherit;font-size:14px;cursor:pointer}
+    .submit:hover{background:#66b1ff;border-color:#66b1ff}
+    .notice{margin:12px 0 0;color:#606266;font-size:12px;line-height:18px;white-space:nowrap}
+    .message{margin:8px 0 0;color:#f56c6c;font-size:12px;line-height:18px;text-align:center}
+    @media(max-width:424px){.login-card{width:100%;padding-right:22px;padding-left:22px}.notice{font-size:11px}}
+  </style>
+</head>
+<body>
+  <main class="login-card">
+    <h1 class="title">🐱🐟 猫猫放置</h1>
+    <nav class="tabs" aria-label="账号操作">
+      <button class="tab active" id="login-tab" type="button">登录</button>
+      <button class="tab" id="register-tab" type="button">注册</button>
+    </nav>
+    <form class="form" id="account-form">
+      <div class="field" id="nickname-field" hidden>
+        <label for="nickname">昵称</label>
+        <input id="nickname" name="nickname" autocomplete="nickname">
+      </div>
+      <div class="field">
+        <label for="email">邮箱</label>
+        <input id="email" name="email" type="email" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="submit" id="submit-button" type="submit">登录</button>
+      <p class="notice">登录会记录IP和浏览器设备标识，用于账号安全及违规封禁。</p>
+      <p class="message" id="message" role="alert"></p>
+    </form>
+  </main>
+  <script>
+    const form = document.querySelector("#account-form");
+    const nicknameField = document.querySelector("#nickname-field");
+    const nicknameInput = document.querySelector("#nickname");
+    const emailInput = document.querySelector("#email");
+    const passwordInput = document.querySelector("#password");
+    const submitButton = document.querySelector("#submit-button");
+    const message = document.querySelector("#message");
+    const tabs = [document.querySelector("#login-tab"), document.querySelector("#register-tab")];
+    let mode = "login";
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      const registering = mode === "register";
+      document.querySelector(".login-card").classList.toggle("registering", registering);
+      nicknameField.hidden = !registering;
+      nicknameInput.required = registering;
+      passwordInput.autocomplete = registering ? "new-password" : "current-password";
+      submitButton.textContent = registering ? "注册并进入" : "登录";
+      tabs.forEach((tab, index) => tab.classList.toggle("active", index === (registering ? 1 : 0)));
+      message.textContent = "";
+    }
+
+    tabs[0].addEventListener("click", () => setMode("login"));
+    tabs[1].addEventListener("click", () => setMode("register"));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      message.textContent = "";
+      submitButton.disabled = true;
+      try {
+        const response = await fetch(mode === "register" ? "/api/auth/register" : "/api/_auth/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            nickname: nicknameInput.value,
+            email: emailInput.value,
+            password: passwordInput.value
+          })
+        });
+        const responseText = await response.text();
+        let result = {};
+        if (responseText) {
+          try {
+            result = JSON.parse(responseText);
+          } catch {
+            throw new Error(`Invalid server response (HTTP ${response.status})`);
+          }
+        }
+        if (!responseText) throw new Error(`Empty server response (HTTP ${response.status})`);
+        if (!response.ok || (mode === "login" && !result.loggedIn)) throw new Error(result.msg || "登录失败");
+        location.assign("/");
+      } catch (error) {
+        message.textContent = error.message || "登录失败";
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+
+
+
+
+
