@@ -912,6 +912,79 @@ function handleMarketEvent(socket, event, payload) {
   return false;
 }
 
+// ---- 系统商店 ----
+// 商品清单、售价、回收价全部来自前端资源表（resourceCatalog 的 userBuyCost / userSellCost /
+// shopType），前端只负责挑商品和数量；结算必须在这里做，否则价格和库存都能被客户端改写。
+// 前端一个入口对应所有商店页签：金币 / 农产品 / 猫爪印章 / 心意点数 / 水产回收。
+const SHOP_MAX_TRADE_COUNT = 1000000;
+
+function shopTradeCount(raw) {
+  const count = marketInteger(raw, 0);
+  return count > 0 && count <= SHOP_MAX_TRADE_COUNT ? count : 0;
+}
+
+// 成本/收益统一按「资源 + 数量」摊平：条目里的 cost 缺省就是金币，同一货币多条目合并
+function shopTradeAmounts(list, multiplier) {
+  const totals = new Map();
+  for (const entry of Array.isArray(list) ? list : []) {
+    const resourceId = entry?.cost ? String(entry.cost) : "gold";
+    const amount = marketNumber(entry?.count) * multiplier;
+    if (Number.isFinite(amount) && amount > 0) totals.set(resourceId, (totals.get(resourceId) || 0) + amount);
+  }
+  return [...totals].map(([resourceId, amount]) => ({ resourceId, amount }));
+}
+
+function shopResourceName(resourceId) {
+  return resourceCatalog?.[resourceId]?.name || resourceId;
+}
+
+function shopTradeInfo(deltas) {
+  const info = {};
+  for (const { resourceId, amount } of deltas) {
+    info[resourceId] = { count: (info[resourceId]?.count || 0) + amount };
+  }
+  return info;
+}
+
+function shopBuy(player, data) {
+  const resourceId = String(data?.id ?? data?.resourceId ?? "");
+  const count = shopTradeCount(data?.count);
+  const item = resourceCatalog[resourceId];
+  if (!item || item.id !== resourceId) return { error: "商品不存在" };
+  if (!count) return { error: "购买数量不合法" };
+  const costs = shopTradeAmounts(item.userBuyCost, count);
+  if (!costs.length) return { error: "该商品暂不出售" };
+  // 限量商品（目前只有赞助商店用）按 maxBuyCount 限制单次数量
+  const limit = marketInteger(item.maxBuyCount, 0);
+  if (limit > 0 && count > limit) return { error: `每次最多购买 ${limit} 个` };
+  for (const cost of costs) {
+    const owned = getAssetCount(player, cost.resourceId);
+    if (owned < cost.amount) {
+      return { error: `${shopResourceName(cost.resourceId)}不足（需要 ${Math.ceil(cost.amount)}，现有 ${Math.floor(owned)}）` };
+    }
+  }
+  // 先全量校验再扣款，避免扣到一半失败
+  for (const cost of costs) removeAsset(player, cost.resourceId, cost.amount);
+  addAsset(player, resourceId, count);
+  const deltas = [{ resourceId, amount: count }, ...costs.map((cost) => ({ resourceId: cost.resourceId, amount: -cost.amount }))];
+  return { tradeInfo: shopTradeInfo(deltas) };
+}
+
+function shopSell(player, data) {
+  const resourceId = String(data?.id ?? data?.resourceId ?? "");
+  const count = shopTradeCount(data?.count);
+  const item = resourceCatalog[resourceId];
+  if (!item || item.id !== resourceId) return { error: "物品不存在" };
+  if (!count) return { error: "出售数量不合法" };
+  const gains = shopTradeAmounts(item.userSellCost, count);
+  if (!gains.length) return { error: "商店不回收该物品" };
+  if (getAssetCount(player, resourceId) < count) return { error: "背包中的数量不足" };
+  if (!removeAsset(player, resourceId, count)) return { error: "背包中的数量不足" };
+  for (const gain of gains) addAsset(player, gain.resourceId, gain.amount);
+  const deltas = [{ resourceId, amount: -count }, ...gains.map((gain) => ({ resourceId: gain.resourceId, amount: gain.amount }))];
+  return { tradeInfo: shopTradeInfo(deltas) };
+}
+
 function getOrCreatePlayer(email) {
   const normalizedEmail = String(email).trim().toLowerCase();
   const existing = [...players.values()].find((item) => item.email === normalizedEmail);
@@ -2962,6 +3035,31 @@ io.on("connection", (socket) => {
     if (event.startsWith("market:") || event.startsWith("buyerMarket:") || event.startsWith("newMarket:")) {
       const handled = handleMarketEvent(socket, event, payload);
       if (handled !== false) return;
+    }
+    if (event === "requestShopBuyResource") {
+      const result = shopBuy(socket.player, data);
+      if (result.error) {
+        emitGameEvent(socket, "requestShopBuyResource:fail", { message: result.error });
+        return;
+      }
+      emitPlayerResources(socket);
+      emitGameEvent(socket, "shopBuySuccess", { tradeInfo: result.tradeInfo });
+      return;
+    }
+    if (event === "requestShopSellResource") {
+      const result = shopSell(socket.player, data);
+      if (result.error) {
+        emitGameEvent(socket, "requestShopSellResource:fail", { message: result.error });
+        return;
+      }
+      emitPlayerResources(socket);
+      emitGameEvent(socket, "shopSellSuccess", { tradeInfo: result.tradeInfo });
+      return;
+    }
+    if (event === "requestInventoryInfo") {
+      // 商店/市场成交后前端会发这个主动拉一次库存
+      emitPlayerResources(socket);
+      return;
     }
     if (event.startsWith("battleRoom:") || event.startsWith("battle:")) {
       const handled = handleBattleRoomEvent(socket, event, data);
