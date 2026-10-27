@@ -218,6 +218,9 @@ const gmPassword = process.env.MAOMAO_GM_PASSWORD || "";
 const accountFile = path.resolve(process.env.MAOMAO_ACCOUNT_FILE || path.join(__dirname, "data", "accounts.json"));
 const playerDataFile = path.resolve(process.env.MAOMAO_PLAYER_FILE || path.join(__dirname, "data", "players.json"));
 const marketDataFile = path.resolve(process.env.MAOMAO_MARKET_FILE || path.join(__dirname, "data", "market.json"));
+// 战斗房间落盘：房间和当前这一场的战斗数据都只在内存里跑，不落盘的话每次重启（发布）都会
+// 把玩家挂着机的房间全部清空，回来就成了「战斗没了」。
+const battleRoomFile = path.resolve(process.env.MAOMAO_ROOM_FILE || path.join(path.dirname(playerDataFile), "rooms.json"));
 // 自定义头像落地目录：跟 players.json 放一起，部署时随 data 目录一起迁移
 const avatarDir = path.join(path.dirname(playerDataFile), "avatars");
 const localRecoveryEnabled = process.env.MAOMAO_LOCAL_RECOVERY !== "false";
@@ -477,6 +480,11 @@ function flushPersistedState() {
     fs.mkdirSync(path.dirname(playerDataFile), { recursive: true });
     writeJsonAtomic(playerDataFile, [...players.values()].map(playerPersistenceView));
     writeJsonAtomic(marketDataFile, [...marketTrades.values()].map(marketPersistenceView));
+    writeJsonAtomic(battleRoomFile, {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      rooms: [...battleRooms.values()].map(battleRoomPersistenceView)
+    });
   } catch (error) {
     console.error("failed to persist game state", error);
   } finally {
@@ -484,6 +492,54 @@ function flushPersistedState() {
     if (persistRequested) {
       persistRequested = false;
       schedulePersist();
+    }
+  }
+}
+
+// 房间里的 battleInfo 在房间内是同一份对象（pushBattleInfo 会把第一名成员的传给所有人），
+// 所以按房间存一份；把 room 和它一起写，恢复时才能接着打而不是从头开始。
+function battleRoomPersistenceView(room) {
+  return { room: { ...room }, battleInfo: roomBattleInfo(room) };
+}
+
+function restoreBattleRooms() {
+  if (!fs.existsSync(battleRoomFile)) return;
+  let saved = null;
+  try {
+    saved = JSON.parse(fs.readFileSync(battleRoomFile, "utf8"));
+  } catch (error) {
+    console.error("failed to read battle rooms, ignore", error);
+    return;
+  }
+  const list = Array.isArray(saved?.rooms) ? saved.rooms : [];
+  let restored = 0;
+  for (const entry of list) {
+    const room = entry?.room;
+    if (!room?.uuid || battleRooms.has(room.uuid)) continue;
+    // 成员可能已被删号：先剔掉，房间空了就丢弃
+    room.memberIds = (Array.isArray(room.memberIds) ? room.memberIds : []).filter((uuid) => players.has(uuid));
+    if (!room.memberIds.length) continue;
+    if (!room.memberIds.includes(room.ownerId)) room.ownerId = room.memberIds[0];
+    room.readyMap = Object.fromEntries(room.memberIds.map((uuid) => [uuid, Boolean(room.readyMap?.[uuid])]));
+    if (!["waiting", "battling", "waiting_for_restart", "ended"].includes(room.status)) room.status = "waiting";
+    room.offerings = Array.isArray(room.offerings) ? room.offerings : [];
+    room.battleRewardInfo = room.battleRewardInfo && typeof room.battleRewardInfo === "object" ? room.battleRewardInfo : {};
+    battleRooms.set(room.uuid, room);
+    for (const uuid of room.memberIds) {
+      const player = players.get(uuid);
+      player.currentBattleRoomId = room.uuid;
+      player.battleInfo = room.status === "battling" ? entry.battleInfo || null : null;
+    }
+    restored += 1;
+  }
+  if (!restored) return;
+  console.log(`[battle] 从 ${path.basename(battleRoomFile)} 恢复 ${restored} 个房间`);
+  // 交给巡检恢复回合/重启倒计时（战斗数据丢了会直接重开一场）
+  for (const room of battleRooms.values()) {
+    try {
+      reviveBattleLoop(room);
+    } catch (error) {
+      console.error("[battle] 恢复房间失败", room.uuid, error);
     }
   }
 }
@@ -1687,6 +1743,8 @@ function beginBattleRound(room) {
   emitRoomEvent(room, "battle:prepareEnd:success", { roomId: room.uuid });
   pushBattleInfo(room);
   startBattleTurns(room);
+  // 每场开头落一次盘：挂机时没有客户端事件，不主动存的话重启只能回到上一场
+  schedulePersist();
 }
 
 function scheduleBattleRestart(room) {
@@ -1701,6 +1759,8 @@ function scheduleBattleRestart(room) {
     if (room.memberIds.length && room.status === "waiting_for_restart") beginBattleRound(room);
   }, restartDelayMs);
   battleTimers.set(room.uuid, timer);
+  // 挂机时没有客户端事件，靠这里把「等待重启」的状态落盘
+  schedulePersist();
 }
 
 function finishBattle(room, result) {
@@ -1729,6 +1789,8 @@ function finishBattle(room, result) {
   }
   emitRoomEvent(room, "battle:end:success", { battleStatus: result, roomId: room.uuid });
   emitRoomUpdate(room);
+  // 战斗结束 + 奖励已入账，立刻落盘，避免重启后回到「还在打」的旧快照
+  schedulePersist();
 }
 
 function resolveBattleTurn(room) {
@@ -3067,6 +3129,9 @@ function shutdown() {
 
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
+
+// 把上次运行残留的房间接回来（挂机房间不能因为一次发布重启就消失）
+restoreBattleRooms();
 
 httpServer.listen(port, host, () => {
   console.log(`猫猫后端 listening on http://${host}:${port}`);
