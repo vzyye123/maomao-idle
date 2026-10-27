@@ -175,17 +175,38 @@ const itemUseEffects = (() => {
   }
 })();
 const statusExperienceThresholds = [0, 20, 45, 80, 125, 180, 245, 320, 405, 500, 605, 720, 845, 980, 1125, 1280, 1445, 1620, 1805, 2000, 2205, 2420, 2645, 2880, 3125, 3380, 3645, 3920, 4205, 4500, 4805, 5760, 6825, 8000, 9285, 10680, 12185, 13800, 15525, 17360, 19305, 21360, 23525, 25800, 28185, 30680, 33285, 36000, 38825, 41760, 44805];
-const statusKeys = ["attacking", "battle", "collecting", "cooking", "defencing", "dexterity", "exploring", "farmingAnimal", "farmingPlant", "fishing", "forging", "intelligence", "knowledge", "manufacturing", "mining", "mysterious", "sewing", "stamina", "strength"];
+const statusKeys = ["attacking", "battle", "collecting", "cooking", "defencing", "dexterity", "enhance", "exploring", "farmingAnimal", "farmingPlant", "fishing", "forging", "intelligence", "knowledge", "luck", "manufacturing", "mining", "mysterious", "sewing", "stamina", "strength", "trading"];
 
+// 参考站的等级经验是「当前等级内进度」：升到下一级需要 statusExperienceThresholds[level] 点，
+// 升级时扣除该门槛并清零重算（实测：Lv.22 2536/2645 → 升到 Lv.23 后 currentExp 变为 0 起的进度）。
 function normalizeStatus(status = {}) {
-  const currentExp = Math.max(0, Number(status.currentExp ?? status.exp) || 0);
-  let level = 1;
-  while (level < statusExperienceThresholds.length - 1 && statusExperienceThresholds[level] <= currentExp) level += 1;
-  return { ...status, level, exp: currentExp, currentExp };
+  const maxLevel = statusExperienceThresholds.length - 1;
+  let level = Math.max(1, Math.min(maxLevel, Number(status.level) || 1));
+  let exp = Math.max(0, Number(status.currentExp ?? status.exp) || 0);
+  if (status.expMode !== "level") {
+    // 早期版本把 currentExp 当作累计经验保存，这里一次性迁移为「等级内进度」
+    level = 1;
+    while (level < maxLevel && statusExperienceThresholds[level] <= exp) level += 1;
+    if (level > 1) exp -= statusExperienceThresholds[level - 1];
+  }
+  while (level < maxLevel && exp >= statusExperienceThresholds[level]) {
+    exp -= statusExperienceThresholds[level];
+    level += 1;
+  }
+  return { ...status, level, exp, currentExp: exp, final: level, expMode: "level" };
 }
 
 function getPlayerStatus(player) {
   return Object.fromEntries(statusKeys.map((key) => [key, normalizeStatus(player.status[key] || {})]));
+}
+
+function addStatusExp(player, key, amount) {
+  const gain = Number(amount) || 0;
+  if (!(gain > 0)) return normalizeStatus(player.status[key] || {});
+  const base = normalizeStatus(player.status[key] || {});
+  const next = normalizeStatus({ ...base, currentExp: base.currentExp + gain, exp: base.currentExp + gain });
+  player.status[key] = next;
+  return next;
 }
 const port = Number(process.env.PORT || 8080);
 const host = process.env.HOST || "127.0.0.1";
@@ -1136,14 +1157,65 @@ function emitRoomEvent(room, event, payload) {
   }
 }
 
+// ---- 战斗数值换算（对照参考站 http://111.229.73.102:8080 实测 + 官方更新日志）----
+// 攻击力 = 力量 × 1.25（更新日志「每点力量提供 0.25 攻击力，仅战斗内显示加成」）+ 战斗等级 × 0.2
+// 防御力 = 耐力 + 战斗等级 × 0.2
+// 生命上限 = 100 + 耐力 × 5；魔法上限 = 50 + 智力 × 5
+// 伤害减免 = (0.0065 × 有效防御) / (1 + 0.0065 × 有效防御)，最终伤害 = floor(伤害 × (1 - 减免))
+const BATTLE_LEVEL_BONUS_PER_LEVEL = 0.2;
+const STRENGTH_ATTACK_BONUS = 0.25;
+const DEFENSE_REDUCTION_CONSTANT = 0.0065;
+const BATTLE_ATTRIBUTE_EXP = { strength: 0.28, attacking: 0.28, dexterity: 0.185, stamina: 0.09, defencing: 0.09 };
+const BATTLE_LOSE_EXP_RATIO = 0.3;
+
+function roundOneDecimal(value) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function battleAttackValue(strengthLevel, battleLevel) {
+  const strength = Number(strengthLevel) || 1;
+  const level = Number(battleLevel) || 1;
+  return roundOneDecimal(strength * (1 + STRENGTH_ATTACK_BONUS) + level * BATTLE_LEVEL_BONUS_PER_LEVEL);
+}
+
+function battleDefenceValue(staminaLevel, battleLevel) {
+  const stamina = Number(staminaLevel) || 1;
+  const level = Number(battleLevel) || 1;
+  return roundOneDecimal(stamina + level * BATTLE_LEVEL_BONUS_PER_LEVEL);
+}
+
+function battleDamageReduction(defenceValue) {
+  const defence = Math.max(0, Number(defenceValue) || 0);
+  const scaled = DEFENSE_REDUCTION_CONSTANT * defence;
+  return scaled / (1 + scaled);
+}
+
+function battleFinalDamage(attackValue, defenceValue) {
+  const attack = Number(attackValue) || 0;
+  const reduction = battleDamageReduction(defenceValue);
+  return Math.max(1, Math.floor(attack * (1 - reduction)));
+}
+
 function makeBattleUnit(player) {
   const status = getPlayerStatus(player);
   const strength = status.strength?.level || 1;
   const stamina = status.stamina?.level || 1;
   const intelligence = status.intelligence?.level || 1;
   const dexterity = status.dexterity?.level || 1;
+  const battleLevel = status.battle?.level || 1;
   const maxHp = 100 + stamina * 5;
-  const maxMp = 100 + intelligence * 5;
+  const maxMp = 50 + intelligence * 5;
+  const attacking = battleAttackValue(strength, battleLevel);
+  const defencing = battleDefenceValue(stamina, battleLevel);
+  const battleStatus = {
+    ...status,
+    attacking: { level: attacking, currentExp: status.strength?.currentExp || 0 },
+    defencing: { level: defencing, currentExp: status.stamina?.currentExp || 0 },
+    dexterity: { level: dexterity, currentExp: status.dexterity?.currentExp || 0 },
+    strength: { level: strength, currentExp: status.strength?.currentExp || 0 },
+    intelligence: { level: intelligence, currentExp: status.intelligence?.currentExp || 0 },
+    stamina: { level: stamina, currentExp: status.stamina?.currentExp || 0 }
+  };
   return {
     uuid: player.uuid,
     id: player.uuid,
@@ -1152,27 +1224,24 @@ function makeBattleUnit(player) {
     isPlayer: true,
     isSummoned: false,
     isBoss: false,
-    level: status.battle?.level || 1,
+    level: battleLevel,
     hp: maxHp,
     maxHp,
     mp: maxMp,
     maxMp,
     tmpShield: 0,
-    status: {
-      ...status,
-      attacking: { level: strength },
-      defencing: { level: stamina },
-      dexterity: { level: dexterity },
-      strength: { level: strength },
-      intelligence: { level: intelligence },
-      stamina: { level: stamina }
-    },
+    expReward: 0,
+    status: battleStatus,
+    baseStatus: structuredClone(battleStatus),
     state: {},
     skills: { baseAttack: { level: 1, order: 0 } },
+    skillOrder: ["baseAttack"],
     ai: {},
     skillColddown: {},
     equipment: {},
-    inventory: {}
+    inventory: {},
+    initialStates: [],
+    affix: []
   };
 }
 
@@ -1273,17 +1342,29 @@ function appendBattleLog(room, type, payload) {
 function grantBattleRewards(room, battleInfo, result) {
   const expRewards = {};
   const resourceRewards = {};
-  if (result === "PLAYER_WIN") {
-    const enemies = battleInfo.members.filter((unit) => !unit.isPlayerUnit && !unit.isSummoned);
-    const totalExp = enemies.reduce((sum, enemy) => sum + (Number(enemy.expReward) || 0), 0);
-    for (const uuid of room.memberIds) {
-      const player = players.get(uuid);
-      if (!player) continue;
-      const exp = Math.max(1, Math.floor(totalExp / Math.max(1, room.memberIds.length)));
-      const currentExp = Number(player.status.battle?.currentExp ?? player.status.battle?.exp) || 0;
-      player.status.battle = normalizeStatus({ ...player.status.battle, currentExp: currentExp + exp, exp: currentExp + exp });
-      expRewards[uuid] = { exp, status: player.status.battle };
-      const gained = {};
+  const enemies = battleInfo.members.filter((unit) => !unit.isPlayerUnit && !unit.isSummoned);
+  const totalExp = enemies.reduce((sum, enemy) => sum + (Number(enemy.expReward) || 0), 0);
+  const baseExp = Math.floor(totalExp / Math.max(1, room.memberIds.length));
+  // 参考站：战斗失败只结算基础经验，胜利额外获得完整经验（难度加成未接入）
+  const exp = result === "PLAYER_WIN"
+    ? Math.max(1, baseExp)
+    : Math.max(0, Math.floor(baseExp * BATTLE_LOSE_EXP_RATIO));
+  // 参考站：战斗会同时给予战斗属性经验（每场固定值，攻/防与力量/耐力同步）
+  const attributeGain = Number(battleInfo.passedTurn) > 0 ? BATTLE_ATTRIBUTE_EXP : null;
+  for (const uuid of room.memberIds) {
+    const player = players.get(uuid);
+    if (!player) continue;
+    const battleStatus = addStatusExp(player, "battle", exp);
+    if (attributeGain) {
+      for (const key of ["strength", "dexterity", "stamina"]) {
+        addStatusExp(player, key, Number(attributeGain[key]) || 0);
+      }
+      player.status.attacking = normalizeStatus({ ...player.status.attacking, expMode: "level", level: player.status.strength.level, currentExp: player.status.strength.currentExp, exp: player.status.strength.currentExp });
+      player.status.defencing = normalizeStatus({ ...player.status.defencing, expMode: "level", level: player.status.stamina.level, currentExp: player.status.stamina.currentExp, exp: player.status.stamina.currentExp });
+    }
+    expRewards[uuid] = { exp, status: battleStatus };
+    const gained = {};
+    if (result === "PLAYER_WIN") {
       for (const enemy of enemies) {
         for (const drop of enemy.drops || []) {
           if (Math.random() > Number(drop.percent ?? 0)) continue;
@@ -1295,14 +1376,14 @@ function grantBattleRewards(room, battleInfo, result) {
           gained[drop.id] = { count: (gained[drop.id]?.count || 0) + count };
         }
       }
-      resourceRewards[uuid] = gained;
-      const memberSocket = [...io.sockets.sockets.values()].find((candidate) => candidate.player?.uuid === uuid);
-      if (memberSocket) {
-        emitGameEvent(memberSocket, "dispatchCharacterStatusInfo", characterInitData(player).status);
-        emitGameEvent(memberSocket, "dispatchInventoryInfo", player.inventory);
-        emitGameEvent(memberSocket, "inventoryUpdated", player.inventory);
-        if (Object.keys(gained).length) emitGameEvent(memberSocket, "inventory:increase:success", gained);
-      }
+    }
+    resourceRewards[uuid] = gained;
+    const memberSocket = [...io.sockets.sockets.values()].find((candidate) => candidate.player?.uuid === uuid);
+    if (memberSocket) {
+      emitGameEvent(memberSocket, "dispatchCharacterStatusInfo", characterInitData(player).status);
+      emitGameEvent(memberSocket, "dispatchInventoryInfo", player.inventory);
+      emitGameEvent(memberSocket, "inventoryUpdated", player.inventory);
+      if (Object.keys(gained).length) emitGameEvent(memberSocket, "inventory:increase:success", gained);
     }
   }
   emitRoomEvent(room, "battle:giveExpReward:success", expRewards);
@@ -1394,30 +1475,37 @@ function resolveBattleTurn(room) {
   if (!target) return;
   const attack = Number(actor.status?.attacking?.level) || Number(actor.attack) || 5;
   const defense = Number(target.status?.defencing?.level) || Number(target.defense) || 0;
-  const damage = Math.max(1, Math.floor(attack * (0.7 + Math.random() * 0.6) - defense * 0.35));
-  const dealt = Math.min(target.hp, damage);
+  // 参考站的普通攻击没有随机浮动：固定基础伤害，再按目标的防御减免结算
+  const damage = battleFinalDamage(attack, defense);
   target.hp = Math.max(0, target.hp - damage);
   const source = actor.uuid;
   const damagePayload = {
     source,
     type: "skill",
     castSkillId: "baseAttack",
-    target: { [target.uuid]: { unit: target.uuid, value: dealt, fDamage: dealt, remainingHp: target.hp, damageType: "physical", shieldDamage: 0 } },
+    target: [{ unit: target.uuid, value: damage, fDamage: damage, remainingHp: target.hp, damageType: "physical", shieldDamage: 0, causeBy: {} }],
     sourceUnitUuid: source,
     targetUnitUuidList: [target.uuid],
     damageType: "physical"
   };
   battleInfo.currentTurnIndex = (battleInfo.currentTurnIndex + 1) % Math.max(1, battleInfo.turnOrder.length);
   if (battleInfo.currentTurnIndex === 0) battleInfo.passedTurn += 1;
+  // 回合开始回复：每 1 点耐力回复 0.1 生命，每 1 点智力回复 0.05 魔法（向下取整，参考站多数回合回复为 0）
   battleInfo.members.forEach((unit) => {
-    if (unit.isPlayerUnit && unit.hp > 0) unit.hp = Math.min(unit.maxHp, unit.hp + Math.max(1, Math.floor((Number(unit.status?.stamina?.level) || 1) * 0.4)));
+    if (!(unit.hp > 0)) return;
+    const hpRegen = Math.floor((Number(unit.status?.stamina?.level) || 1) * 0.1);
+    const mpRegen = Math.floor((Number(unit.status?.intelligence?.level) || 1) * 0.05);
+    if (hpRegen > 0) unit.hp = Math.min(unit.maxHp, unit.hp + hpRegen);
+    if (mpRegen > 0) unit.mp = Math.min(unit.maxMp, unit.mp + mpRegen);
+    if (hpRegen > 0) emitRoomEvent(room, "battle:heal:success", { source: unit.uuid, target: unit.uuid, value: hpRegen, reason: "turnRegen" });
+    if (mpRegen > 0) emitRoomEvent(room, "battle:restoreMp:success", { target: unit.uuid, value: mpRegen });
   });
   appendBattleLog(room, "damage", { ...damagePayload, damage: damagePayload.target });
   emitRoomEvent(room, "battle:turnStart:success", { source });
   emitRoomEvent(room, "battle:castSkill:success", { source, skillId: "baseAttack" });
   emitRoomEvent(room, "battle:dealDamage:success", damagePayload);
   emitRoomEvent(room, "battle:drawLine:success", { source, target: target.uuid, color: "#f56c6c" });
-  emitRoomEvent(room, "battle:floatText:success", { unit: target.uuid, text: `-${dealt}` });
+  emitRoomEvent(room, "battle:floatText:success", { unit: target.uuid, text: `-${damage}` });
   emitRoomEvent(room, "battle:turnEnd:success", { source });
   emitRoomEvent(room, "battle:update:success", battleInfo);
 
