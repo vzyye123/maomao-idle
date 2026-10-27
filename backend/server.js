@@ -218,6 +218,8 @@ const gmPassword = process.env.MAOMAO_GM_PASSWORD || "";
 const accountFile = path.resolve(process.env.MAOMAO_ACCOUNT_FILE || path.join(__dirname, "data", "accounts.json"));
 const playerDataFile = path.resolve(process.env.MAOMAO_PLAYER_FILE || path.join(__dirname, "data", "players.json"));
 const marketDataFile = path.resolve(process.env.MAOMAO_MARKET_FILE || path.join(__dirname, "data", "market.json"));
+// 自定义头像落地目录：跟 players.json 放一起，部署时随 data 目录一起迁移
+const avatarDir = path.join(path.dirname(playerDataFile), "avatars");
 const localRecoveryEnabled = process.env.MAOMAO_LOCAL_RECOVERY !== "false";
 const scrypt = promisify(crypto.scrypt);
 const sessions = new Map();
@@ -367,6 +369,8 @@ function makePlayer(email, name, existingUuid, createdAt) {
     name: name || email.split("@")[0] || "猫猫",
     avatar: "avatar_1.png",
     title: null,
+    // 角色设置里的开关（隐藏公会头衔、关闭登录邮箱验证等），由 character:updateProfile 写入
+    option: {},
     resources: { gold: 1000, food: 100 },
     inventory: { __satiety: { count: 0 } },
     status: {},
@@ -402,6 +406,7 @@ function playerPersistenceView(player) {
     name: player.name,
     avatar: player.avatar,
     title: player.title,
+    option: player.option || {},
     resources: player.resources,
     inventory: player.inventory,
     status: player.status,
@@ -1002,6 +1007,7 @@ app.get("/api/gm/players/:uuid", requireGM, (req, res) => {
     ...safePlayerSummary(player),
     avatar: player.avatar,
     title: player.title,
+    option: player.option || {},
     resources: player.resources,
     inventory: player.inventory,
     status: getPlayerStatus(player),
@@ -1083,6 +1089,70 @@ app.post("/api/gm/market/:tradeUuid/cancel", requireGM, (req, res) => {
   return ok(res, marketTradeView(trade, ""));
 });
 app.get("/api/app/version.check", (_req, res) => ok(res, { showUpdateLog: false, version: "local" }));
+
+// ---- 自定义头像 ----
+// 前端 AvatarSelect 用 canvas.toBlob 生成 256x256 PNG，塞进 FormData 的 `file` 字段上传，
+// 期望 `{ code: 200, data: { avatar: "user_xxx.png" } }`；返回的 avatar 再由 character:updateProfile 存到玩家身上。
+// 后端只有 express + socket.io，不引 multer，这里手解 multipart（只取一个 file part）。
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_FILE_PATTERN = /^user_[A-Za-z0-9_-]{1,80}\.png$/;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function extractMultipartFile(buffer, boundary) {
+  if (!buffer?.length || !boundary) return null;
+  const marker = Buffer.from(`--${boundary}`);
+  let cursor = buffer.indexOf(marker);
+  while (cursor >= 0) {
+    const partStart = cursor + marker.length;
+    const next = buffer.indexOf(marker, partStart);
+    if (next < 0) break;
+    // 去掉 part 起始的 \r\n 和结尾的 \r\n
+    const slice = buffer.subarray(partStart + 2, next - 2);
+    const headerEnd = slice.indexOf("\r\n\r\n");
+    if (headerEnd >= 0) {
+      const headers = slice.subarray(0, headerEnd).toString("utf8");
+      const name = /name="([^"]*)"/i.exec(headers)?.[1];
+      if (name === "file") return { headers, data: slice.subarray(headerEnd + 4) };
+    }
+    cursor = next;
+  }
+  return null;
+}
+
+function multipartBoundary(contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ""));
+  return (match?.[1] || match?.[2] || "").trim();
+}
+
+app.post("/api/game/user/upload-avatar", requirePlayer, express.raw({ type: "multipart/form-data", limit: AVATAR_MAX_BYTES + 64 * 1024 }), (req, res) => {
+  const boundary = multipartBoundary(req.headers["content-type"]);
+  const part = extractMultipartFile(req.body, boundary);
+  if (!part) return res.status(400).json({ code: 400, msg: "未收到头像文件" });
+  if (part.data.length < PNG_MAGIC.length || !part.data.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC)) {
+    return res.status(400).json({ code: 400, msg: "头像必须是 PNG 图片" });
+  }
+  if (part.data.length > AVATAR_MAX_BYTES) return res.status(400).json({ code: 400, msg: "头像文件过大" });
+  // 文件名由服务端生成：前端用 `/^user_/` 判断是否需要回源，加时间戳避免浏览器缓存旧图
+  const filename = `user_${req.player.uuid.slice(0, 8)}_${Date.now().toString(36)}.png`;
+  try {
+    fs.mkdirSync(avatarDir, { recursive: true });
+    fs.writeFileSync(path.join(avatarDir, filename), part.data, { mode: 0o644 });
+  } catch {
+    return res.status(500).json({ code: 500, msg: "头像保存失败" });
+  }
+  return ok(res, { avatar: filename });
+});
+app.get("/api/game/user/avatar/:avatar", (req, res) => {
+  const name = String(req.params.avatar || "");
+  // 只放行服务端生成的文件名，避免路径穿越
+  if (!AVATAR_FILE_PATTERN.test(name)) return res.status(404).send("not found");
+  const file = path.join(avatarDir, name);
+  if (!fs.existsSync(file)) return res.status(404).send("not found");
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "public, max-age=604800, immutable");
+  return res.sendFile(file);
+});
+
 app.get("/api/game/user/profile", requirePlayer, (req, res) => {
   const uuid = typeof req.query.uuid === "string" ? req.query.uuid.trim() : "";
   // 不带 uuid 时返回自己；带了就必须返回被查询的人，否则组队列表里队友名字会一直显示「加载中」
@@ -1104,17 +1174,69 @@ app.get("/api/game/user/online", requirePlayer, (req, res) => ok(res, { online: 
 app.post("/api/game/user/online", requirePlayer, (req, res) => ok(res, { online: true, uuid: req.player.uuid, fp: req.body?.fp || null }));
 app.post("/api/game/user/switch_account", requirePlayer, (_req, res) => ok(res, publicUser(req.player)));
 app.get("/api/game/kitty/profile", requirePlayer, (req, res) => ok(res, { uuid: req.player.uuid, kitty: req.player.kitty }));
-app.get("/api/game/guild/profile", requirePlayer, (req, res) => ok(res, { uuid: req.query.uuid || null, name: "猫猫村" }));
+// 本地还没有公会系统，这里是占位：uuid 原样回传（前端 GuildInfo 会校验 data.uuid === 查询的 uuid），
+// 名字统一显示「猫猫村」——所有猫都属于同一个村。查不到的 uuid 返回 404，避免前端把脏数据写进缓存。
+app.get("/api/game/guild/profile", requirePlayer, (req, res) => {
+  const uuid = typeof req.query.uuid === "string" ? req.query.uuid.trim() : "";
+  if (uuid && !players.get(uuid)) return res.status(404).json({ code: 404, msg: "玩家不存在" });
+  return ok(res, { uuid: uuid || req.player.uuid, name: "猫猫村" });
+});
 app.get("/api/game/market/price", requirePlayer, (req, res) => ok(res, marketPricePayload(req.query.resourceId || null)));
 app.get("/api/game/onboarding/status", requirePlayer, (_req, res) => ok(res, { seen: true }));
 app.post("/api/game/onboarding/mark-seen", requirePlayer, (_req, res) => ok(res, { seen: true }));
 app.get("/api/game/sponsor/service-usage", requirePlayer, (_req, res) => ok(res, { used: 0, limit: 0 }));
 app.post("/api/game/tmp_notification/get_notification_info", requirePlayer, (_req, res) => ok(res, { is_unread: false }));
-app.get("/api/game/user/avatar/:avatar", (_req, res) => res.sendStatus(404));
+
+const PROFILE_NAME_MAX = 24;
+// 头像允许：内置头像表里的文件名（avatar_N.png / 活动头像 key）、上传生成的文件名、外链
+const AVATAR_VALUE_PATTERN = /^(?:[A-Za-z0-9_.-]{1,64}\.(?:png|webp|webm)|https?:\/\/\S{1,300})$/;
+const PROFILE_OPTION_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,40}$/;
+
+function sanitizeProfileOption(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  let count = 0;
+  for (const [key, item] of Object.entries(value)) {
+    if (count >= 30) break;
+    if (!PROFILE_OPTION_KEY_PATTERN.test(key)) continue;
+    if (typeof item === "boolean" || typeof item === "number") {
+      result[key] = item;
+      count += 1;
+    } else if (typeof item === "string" && item.length <= 200) {
+      result[key] = item;
+      count += 1;
+    }
+  }
+  return result;
+}
+
+// 角色设置里的「保存」：昵称 / 头像 / 选项开关。title 不在这里改（称号不该由玩家自封）。
+function applyCharacterProfileUpdate(player, data) {
+  const payload = data?.data ?? data ?? {};
+  if (payload.name !== undefined) {
+    const name = typeof payload.name === "string" ? payload.name.trim() : "";
+    if (!name || name.length > PROFILE_NAME_MAX) return { error: `昵称不能为空且不能超过${PROFILE_NAME_MAX}个字符` };
+    player.name = name;
+  }
+  if (payload.avatar !== undefined) {
+    const avatar = typeof payload.avatar === "string" ? payload.avatar.trim() : "";
+    if (!AVATAR_VALUE_PATTERN.test(avatar)) return { error: "头像不合法" };
+    player.avatar = avatar;
+  }
+  if (payload.option !== undefined) {
+    const option = sanitizeProfileOption(payload.option);
+    // 逐键合并而不是整体替换：表单没回显到某个开关时不能把它顺手清掉
+    if (option && Object.keys(option).length > 0) player.option = { ...(player.option || {}), ...option };
+  }
+  return { profile: publicProfileView(player, player.uuid) };
+}
 
 function eventResult(event, player, payload) {
   const data = payload?.data ?? payload ?? {};
-  if (event === "character:getProfile" || event === "character:getInfo") return { ...publicUser(player), resources: player.resources };
+  if (event === "character:getProfile" || event === "character:getInfo") {
+    // 只有本人会走这里，所以带上 option 开关；对外的 publicProfileView 不暴露
+    return { ...publicProfileView(player, player.uuid), option: player.option || {}, resources: player.resources };
+  }
   if (event === "character:getGameState") return { resources: player.resources, inventory: player.inventory, taskQueue: player.taskQueue };
   if (event === "character:getEquipment") return data.type === "battle" ? player.battleEquipment : player.workEquipment;
   if (event === "character:getSkills") return player.skills || { baseAttack: { level: 1, order: 0 } };
@@ -2844,6 +2966,20 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:unequip:success", result.equipment);
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+      return;
+    }
+    if (event === "character:updateProfile") {
+      const result = applyCharacterProfileUpdate(socket.player, data);
+      if (result.error) {
+        // 前端把 payload 直接丢给 ElMessage，所以这里必须发字符串
+        emitGameEvent(socket, "character:updateProfile:error", result.error);
+        return;
+      }
+      schedulePersist();
+      emitGameEvent(socket, "character:updateProfile:success", "保存成功");
+      // 名字/头像变了，房间成员列表要跟着刷
+      const room = getBattleRoom(socket.player.currentBattleRoomId);
+      if (room) emitRoomUpdate(room);
       return;
     }
     if (event.startsWith("farm:") && handleFarmEvent(socket, event, data)) return;

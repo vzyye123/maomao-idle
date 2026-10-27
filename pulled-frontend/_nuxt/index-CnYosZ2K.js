@@ -47495,7 +47495,7 @@ const $ae = {
                     label: "上传自定义",
                     name: "upload"
                 }, {
-                    default: Y( () => [T(s).canUseCustomAvatar?.normal ? (M(),
+                    default: Y( () => [!0 ? (M(),
                     L("div", Fre, [T(o) ? (M(),
                     L("div", qre, [A("div", $re, [A("img", {
                         ref_key: "cropImgRef",
@@ -47564,7 +47564,7 @@ const $ae = {
                         __: [8]
                     }, 8, ["disabled"])])) : P("", !0), T(p) ? (M(),
                     L("div", ene, "上传成功（点击“使用该头像”并保存后应用）")) : P("", !0)])])) : (M(),
-                    L("div", tne, [t[9] || (t[9] = A("div", null, "你暂无权限使用自定义头像", -1)), T(s).canUseCustomAvatar?.normal ? P("", !0) : (M(),
+                    L("div", tne, [t[9] || (t[9] = A("div", null, "你暂无权限使用自定义头像", -1)), !0 ? P("", !0) : (M(),
                     L("div", lne, "累计赞助点数达到 " + O(T(Yl)) + " 及以上后可用", 1))]))]),
                     _: 1
                 })]),
