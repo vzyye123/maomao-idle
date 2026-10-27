@@ -1135,7 +1135,12 @@ function getBattleRoom(roomId) {
 }
 
 function publicBattleRoom(room) {
-  return room ? structuredClone(room) : null;
+  if (!room) return null;
+  // battleRewardInfo 只通过 battleRoom:rewardInfo 下发，避免每次房间广播都带上全部战利品
+  const { battleRewardInfo, battleRewardInfoExpireAt, ...rest } = room;
+  const cloned = structuredClone(rest);
+  cloned.hasBattleRewardInfo = Boolean(battleRewardInfo && Object.keys(battleRewardInfo).length);
+  return cloned;
 }
 
 function emitRoomUpdate(room) {
@@ -1198,6 +1203,71 @@ function battleFinalDamage(attackValue, defenceValue) {
   return Math.max(1, Math.floor(attack * (1 - reduction)));
 }
 
+// ---- 战斗掉落（对照参考站 game-battle-skill-I4Ckwbp2.js 导出的难度表 He / 常量 Ge）----
+// 副本难度：房间 difficulty = 0（无额外难度）/ 1..6，索引进表即 difficulty - 1。
+// 怪物数值 = 原值 × (1 + 百分比) + 固定值；敌人数量 + additionalEnemyCount；
+// 掉落率、经验均为「乘算」加成：掉落率 ×= (1 + additionalDropPercent)，经验 ×= (1 + additionalExpPercent)。
+const BATTLE_DIFFICULTY_CATALOG = [
+  { hpBase: 200, attackBase: 30, defenseBase: 50, hpPercent: 0.25, attackPercent: 0.25, defensePercent: 0.25, additionalEnemyCount: 2, additionalDropPercent: 0.15, additionalExpPercent: 0.15 },
+  { hpBase: 350, attackBase: 45, defenseBase: 65, hpPercent: 0.35, attackPercent: 0.35, defensePercent: 0.35, additionalEnemyCount: 2, additionalDropPercent: 0.25, additionalExpPercent: 0.23 },
+  { hpBase: 550, attackBase: 60, defenseBase: 80, hpPercent: 0.5, attackPercent: 0.5, defensePercent: 0.5, additionalEnemyCount: 3, additionalDropPercent: 0.4, additionalExpPercent: 0.31 },
+  { hpBase: 800, attackBase: 75, defenseBase: 95, hpPercent: 0.7, attackPercent: 0.7, defensePercent: 0.7, additionalEnemyCount: 3, additionalDropPercent: 0.6, additionalExpPercent: 0.5 },
+  { hpBase: 1100, attackBase: 90, defenseBase: 110, hpPercent: 1, attackPercent: 1, defensePercent: 1, additionalEnemyCount: 4, additionalDropPercent: 0.9, additionalExpPercent: 0.75 },
+  { hpBase: 5500, attackBase: 200, defenseBase: 300, hpPercent: 2, attackPercent: 2, defensePercent: 2, additionalEnemyCount: 4, additionalDropPercent: 1.25, additionalExpPercent: 1.25 }
+];
+// 硬核猫房间的「金币/战利品比例」滑块：每格金币 -10%，战利品掉落率 +7.5%
+const LOOT_GOLD_SLIDER_GOLD_STEP = 0.1;
+const LOOT_GOLD_SLIDER_LOOT_STEP = 0.075;
+// 参考站：战利品信息最多在房间停止战斗后保留 6 小时
+const BATTLE_REWARD_INFO_TTL_MS = 6 * 60 * 60 * 1000;
+
+function battleDifficultyConfig(room) {
+  const index = Math.floor(Number(room?.difficulty) || 0) - 1;
+  return BATTLE_DIFFICULTY_CATALOG[index] || null;
+}
+
+function battleLootGoldSlider(room) {
+  return Math.max(0, Math.min(10, Math.floor(Number(room?.lootGoldSlider) || 0)));
+}
+
+// 战利品掉落率乘算：难度加成 × 金币/战利品比例滑块（参考站「战利品掉落概率为最终乘算」）
+function battleDropMultiplier(room) {
+  const difficulty = battleDifficultyConfig(room);
+  const difficultyBonus = 1 + (difficulty?.additionalDropPercent || 0);
+  const sliderBonus = 1 + LOOT_GOLD_SLIDER_LOOT_STEP * battleLootGoldSlider(room);
+  return difficultyBonus * sliderBonus;
+}
+
+// 金币获取比例：只有滑块会削减金币，难度不削减
+function battleGoldMultiplier(room) {
+  return Math.max(0, 1 - LOOT_GOLD_SLIDER_GOLD_STEP * battleLootGoldSlider(room));
+}
+
+function battleExpMultiplier(room) {
+  const difficulty = battleDifficultyConfig(room);
+  return 1 + (difficulty?.additionalExpPercent || 0);
+}
+
+function scaleEnemyStat(baseValue, percent, fixedValue) {
+  const base = Number(baseValue) || 0;
+  return roundOneDecimal(base * (1 + (Number(percent) || 0)) + (Number(fixedValue) || 0));
+}
+
+// 掷一次掉落：基础概率 × 乘算倍率；超过 100% 的整数部分转为掉落数量（参考站 2025-07-03 更新）
+function rollBattleDrop(drop, multiplier) {
+  const basePercent = Math.max(0, Number(drop?.percent) || 0);
+  const effective = basePercent * (Number(multiplier) || 0);
+  if (!(effective > 0)) return 0;
+  const guaranteed = Math.floor(effective);
+  const remainder = effective - guaranteed;
+  const times = guaranteed + (Math.random() < remainder ? 1 : 0);
+  if (times <= 0) return 0;
+  const minimum = Math.max(1, Math.floor(Number(drop?.range?.min ?? drop?.count ?? 1)));
+  const maximum = Math.max(minimum, Math.floor(Number(drop?.range?.max ?? drop?.count ?? minimum)));
+  const perRoll = minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+  return perRoll * times;
+}
+
 function makeBattleUnit(player) {
   const status = getPlayerStatus(player);
   const strength = status.strength?.level || 1;
@@ -1252,9 +1322,12 @@ function makeBattleInfo(room) {
   const area = battleAreaCatalog[room.area] || battleAreaCatalog.forest_001;
   const specialBattle = area?.specialBattles?.find((item) => item.every && (room.turn || 1) % item.every === 0);
   const enemyPool = specialBattle?.enemies?.length ? specialBattle.enemies : area?.enemyPool || [];
-  const enemyCount = specialBattle?.enemies?.length
+  const difficulty = battleDifficultyConfig(room);
+  const baseEnemyCount = specialBattle?.enemies?.length
     ? Math.max(1, Math.min(specialBattle.maxBossNum || 1, specialBattle.enemies.length))
     : Math.max(1, Number(area?.minEnemies) || 1) + Math.floor(Math.random() * Math.max(1, (Number(area?.maxEnemies) || 3) - (Number(area?.minEnemies) || 1) + 1));
+  // 难度等级：额外敌人数量（参考站建房界面「额外敌人数量」）
+  const enemyCount = baseEnemyCount + (difficulty?.additionalEnemyCount || 0);
   const enemies = [];
   for (let index = 0; index < enemyCount; index += 1) {
     const weightedPool = specialBattle?.enemies?.length ? specialBattle.enemies : enemyPool;
@@ -1283,6 +1356,15 @@ function makeBattleInfo(room) {
     enemy.equipment ||= {};
     enemy.inventory ||= {};
     enemy.state ||= {};
+    if (difficulty) {
+      // 难度等级：生命/攻击/防御 = 原值 × (1 + 百分比) + 固定值（参考站建房界面的难度说明）
+      enemy.hp = Math.round(scaleEnemyStat(enemy.maxHp ?? enemy.hp, difficulty.hpPercent, difficulty.hpBase));
+      enemy.maxHp = enemy.hp;
+      enemy.attack = scaleEnemyStat(enemy.attack, difficulty.attackPercent, difficulty.attackBase);
+      enemy.defense = scaleEnemyStat(enemy.defense, difficulty.defensePercent, difficulty.defenseBase);
+      enemy.status.attacking = { ...(enemy.status.attacking || {}), level: enemy.attack };
+      enemy.status.defencing = { ...(enemy.status.defencing || {}), level: enemy.defense };
+    }
     enemies.push(enemy);
   }
   const members = [...playersInBattle, ...enemies];
@@ -1341,18 +1423,45 @@ function appendBattleLog(room, type, payload) {
   if (battleInfo.battleLog.length > 300) battleInfo.battleLog.shift();
 }
 
+// 房间内累计战利品（参考站「查看战斗奖励」面板）：{ [uuid]: { [itemId]: { count } } }，
+// 房间停止战斗后保留 6 小时。
+function accumulateRoomBattleLoot(room, uuid, gained) {
+  if (!room.battleRewardInfo || typeof room.battleRewardInfo !== "object") room.battleRewardInfo = {};
+  const record = room.battleRewardInfo[uuid] || (room.battleRewardInfo[uuid] = {});
+  for (const [itemId, info] of Object.entries(gained)) {
+    const count = Number(info?.count) || 0;
+    if (!(count > 0)) continue;
+    record[itemId] = { count: (Number(record[itemId]?.count) || 0) + count };
+  }
+  room.battleRewardInfoExpireAt = Date.now() + BATTLE_REWARD_INFO_TTL_MS;
+}
+
+function battleRewardInfoOf(room) {
+  if (!room) return {};
+  if (room.battleRewardInfoExpireAt && Date.now() > room.battleRewardInfoExpireAt) {
+    room.battleRewardInfo = {};
+    room.battleRewardInfoExpireAt = null;
+    return {};
+  }
+  const info = room.battleRewardInfo && typeof room.battleRewardInfo === "object" ? room.battleRewardInfo : {};
+  // 已经离开房间的成员不再展示（参考站面板只显示「当前成员」）
+  return Object.fromEntries(Object.entries(info).filter(([uuid]) => room.memberIds.includes(uuid)));
+}
+
 function grantBattleRewards(room, battleInfo, result) {
   const expRewards = {};
   const resourceRewards = {};
   const enemies = battleInfo.members.filter((unit) => !unit.isPlayerUnit && !unit.isSummoned);
   const totalExp = enemies.reduce((sum, enemy) => sum + (Number(enemy.expReward) || 0), 0);
   const baseExp = Math.floor(totalExp / Math.max(1, room.memberIds.length));
-  // 参考站：战斗失败只结算基础经验，胜利额外获得完整经验（难度加成未接入）
+  // 参考站：战斗失败只结算基础经验，胜利额外获得完整经验（难度加成的额外经验仅胜利提供）
   const exp = result === "PLAYER_WIN"
-    ? Math.max(1, baseExp)
+    ? Math.max(1, Math.floor(baseExp * battleExpMultiplier(room)))
     : Math.max(0, Math.floor(baseExp * BATTLE_LOSE_EXP_RATIO));
   // 参考站：战斗会同时给予战斗属性经验（每场固定值，攻/防与力量/耐力同步）
   const attributeGain = Number(battleInfo.passedTurn) > 0 ? BATTLE_ATTRIBUTE_EXP : null;
+  const lootMultiplier = battleDropMultiplier(room);
+  const goldMultiplier = battleGoldMultiplier(room);
   for (const uuid of room.memberIds) {
     const player = players.get(uuid);
     if (!player) continue;
@@ -1369,10 +1478,10 @@ function grantBattleRewards(room, battleInfo, result) {
     if (result === "PLAYER_WIN") {
       for (const enemy of enemies) {
         for (const drop of enemy.drops || []) {
-          if (Math.random() > Number(drop.percent ?? 0)) continue;
-          const minimum = Number(drop.range?.min ?? drop.count ?? 1);
-          const maximum = Number(drop.range?.max ?? drop.count ?? minimum);
-          const count = Math.max(1, Math.floor(minimum + Math.random() * (maximum - minimum + 1)));
+          // 金币走「金币获取比例」，其余物品走「战利品掉落率」（难度加成 × 金币/战利品比例滑块）
+          const multiplier = drop.id === "gold" ? goldMultiplier : lootMultiplier;
+          const count = rollBattleDrop(drop, multiplier);
+          if (!(count > 0)) continue;
           const current = Number(player.inventory[drop.id]?.count) || 0;
           player.inventory[drop.id] = { count: current + count };
           gained[drop.id] = { count: (gained[drop.id]?.count || 0) + count };
@@ -1380,6 +1489,7 @@ function grantBattleRewards(room, battleInfo, result) {
       }
     }
     resourceRewards[uuid] = gained;
+    if (Object.keys(gained).length) accumulateRoomBattleLoot(room, uuid, gained);
     const memberSocket = [...io.sockets.sockets.values()].find((candidate) => candidate.player?.uuid === uuid);
     if (memberSocket) {
       emitGameEvent(memberSocket, "dispatchCharacterStatusInfo", characterInitData(player).status);
@@ -1591,6 +1701,11 @@ function handleBattleRoomEvent(socket, event, data) {
       denseFogMode: Boolean(data.denseFogMode),
       phantomUuidList: Array.isArray(data.phantomUuidList) ? data.phantomUuidList : [],
       publicBattleLoot: data.publicBattleLoot !== false,
+      // 硬核猫房间的「金币/战利品比例」滑块（0-10）：金币 -10%/格，战利品 +7.5%/格
+      lootGoldSlider: Math.max(0, Math.min(10, Math.floor(Number(data.lootGoldSlider) || 0))),
+      // 「查看战斗奖励」面板的累计战利品，停战后保留 6 小时
+      battleRewardInfo: {},
+      battleRewardInfoExpireAt: null,
       worldBossId: data.worldBossId || null,
       worldBossVersion: data.worldBossVersion,
       afterWin: data.afterWin || null,
@@ -1647,6 +1762,19 @@ function handleBattleRoomEvent(socket, event, data) {
 
   if (!room || !room.memberIds.includes(player.uuid)) return fail("你不在该房间");
 
+  if (event === "battleRoom:rewardInfo") {
+    // 「查看战斗奖励」：下发本房间当前成员的战利品累计（itemId -> { count }）。
+    // 前端订阅封装会先剥一层 data，而组件再取 e.data，所以这里要多包一层（与 characterInitData 一致）。
+    emitSuccess(event, { data: battleRewardInfoOf(room) });
+    return;
+  }
+
+  if (event === "battleRoom:resetSelfBattleRewardInfo") {
+    if (room.battleRewardInfo && typeof room.battleRewardInfo === "object") delete room.battleRewardInfo[player.uuid];
+    emitSuccess(event, { uuid: player.uuid });
+    return;
+  }
+
   if (event === "battleRoom:kick") {
     if (room.ownerId !== player.uuid) return fail("只有房主可以移除成员");
     const targetId = data.userUuid || data.memberUuid || data.targetUuid;
@@ -1668,8 +1796,10 @@ function handleBattleRoomEvent(socket, event, data) {
 
   if (event === "battleRoom:update") {
     if (room.ownerId !== player.uuid || !["waiting", "ended"].includes(room.status)) return fail("当前无法修改房间");
-    const editable = ["name", "area", "isPublic", "autoRestart", "autoStartBattle", "difficulty", "denseFogMode", "autoRestartDenseFogMode", "phantomUuidList", "publicBattleLoot", "battleType", "worldBossId", "worldBossVersion", "afterWin"];
+    const editable = ["name", "area", "isPublic", "autoRestart", "autoStartBattle", "difficulty", "denseFogMode", "autoRestartDenseFogMode", "phantomUuidList", "publicBattleLoot", "lootGoldSlider", "battleType", "worldBossId", "worldBossVersion", "afterWin"];
     for (const key of editable) if (data[key] !== undefined) room[key] = data[key];
+    room.difficulty = Math.max(0, Math.min(BATTLE_DIFFICULTY_CATALOG.length, Math.floor(Number(room.difficulty) || 0)));
+    room.lootGoldSlider = Math.max(0, Math.min(10, Math.floor(Number(room.lootGoldSlider) || 0)));
     room.lastUpdateAt = Date.now();
     emitSuccess(event, publicBattleRoom(room));
     emitRoomUpdate(room);
