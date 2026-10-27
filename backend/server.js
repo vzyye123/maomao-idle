@@ -1694,6 +1694,7 @@ function scheduleBattleRestart(room) {
   room.status = "waiting_for_restart";
   room.waitingForRestartTime = Date.now() + restartDelayMs;
   room.lastUpdateAt = Date.now();
+  console.log(`[battle] 房间 ${room.uuid} 第 ${room.turn || 1} 场结束，${restartDelayMs / 1000}s 后自动开下一场（在线人数无关）`);
   emitRoomUpdate(room);
   const timer = setTimeout(() => {
     battleTimers.delete(room.uuid);
@@ -1713,7 +1714,9 @@ function finishBattle(room, result) {
     emitRoomEvent(room, "battle:update:success", battleInfo);
     grantBattleRewards(room, battleInfo, result);
   }
-  if (room.autoRestart && (result === "PLAYER_WIN" || result === "PLAYER_LOSE")) {
+  // 「自动开始战斗」和「自动重启」在离线挂机场景下是同一件事：一场打完就接着开下一场。
+  // 之前只认 autoRestart，玩家勾了「自动开始战斗」也会打完就停。
+  if ((room.autoRestart || room.autoStartBattle) && (result === "PLAYER_WIN" || result === "PLAYER_LOSE")) {
     scheduleBattleRestart(room);
     return;
   }
@@ -1800,6 +1803,54 @@ function startBattleTurns(room) {
   if (timer) clearTimeout(timer);
   battleTimers.set(room.uuid, setTimeout(() => resolveBattleTurn(room), 900));
 }
+
+// ---- 战斗循环自愈 ----
+// 房间里没人在线时，整场战斗完全靠 setTimeout 链推进：只要有一环丢了（重连时被 clear、
+// 回调里抛异常、系统休眠导致定时器漂移…），房间就会停在 "battling" 却再也不出回合，
+// 玩家回来只看到「战斗结束」。这里每 5 秒巡检一次，缺定时器就补、战斗数据丢了就重开一轮。
+const BATTLE_WATCHDOG_INTERVAL_MS = 5000;
+
+function roomBattleInfo(room) {
+  return room.memberIds.map((uuid) => players.get(uuid)?.battleInfo).find(Boolean) || null;
+}
+
+function reviveBattleLoop(room) {
+  if (!room.memberIds.length) return;
+  if (room.status === "battling") {
+    if (!roomBattleInfo(room)) {
+      // 回合数据没了但房间还标着「战斗中」：重开一场，别让房间永久卡住
+      console.warn(`[battle] 房间 ${room.uuid} 战斗数据丢失，直接开始新一场`);
+      beginBattleRound(room);
+      return;
+    }
+    if (!battleTimers.has(room.uuid)) {
+      console.warn(`[battle] 房间 ${room.uuid} 回合定时器丢失，补一次回合`);
+      startBattleTurns(room);
+    }
+    return;
+  }
+  if (room.status !== "waiting_for_restart" || battleTimers.has(room.uuid)) return;
+  const remain = (Number(room.waitingForRestartTime) || 0) - Date.now();
+  if (remain <= 0) {
+    console.warn(`[battle] 房间 ${room.uuid} 重启定时器丢失且已超时，立即开下一场`);
+    beginBattleRound(room);
+    return;
+  }
+  battleTimers.set(room.uuid, setTimeout(() => {
+    battleTimers.delete(room.uuid);
+    if (room.memberIds.length && room.status === "waiting_for_restart") beginBattleRound(room);
+  }, remain));
+}
+
+setInterval(() => {
+  for (const room of battleRooms.values()) {
+    try {
+      reviveBattleLoop(room);
+    } catch (error) {
+      console.error("[battle] 巡检异常", room.uuid, error);
+    }
+  }
+}, BATTLE_WATCHDOG_INTERVAL_MS).unref();
 
 function removePlayerFromBattleRoom(player, socket, { emit = true } = {}) {
   const room = getBattleRoom(player.currentBattleRoomId);
