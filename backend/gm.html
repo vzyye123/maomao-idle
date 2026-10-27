@@ -1,0 +1,1019 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>猫猫放置 · GM 控制台</title>
+<style>
+  :root{
+    --bg:#f5f6fa; --card:#fff; --line:#e5e7f0; --text:#1f2333; --muted:#7b8199;
+    --accent:#6366f1; --accent-soft:#eef0ff; --danger:#ef4444; --ok:#10b981;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  [hidden]{display:none!important}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text); font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--text);padding:5px 11px;transition:.15s}
+  button:hover{border-color:#c9cce0;background:#fafbff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{background:#5558e8;border-color:#5558e8}
+  button.danger{background:#fff;border-color:#f6c6c6;color:var(--danger)}
+  button.danger:hover{background:#fef2f2}
+  button.ghost{background:transparent}
+  input,select{font:inherit;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:5px 9px;background:#fff;outline:0}
+  input:focus,select:focus{border-color:var(--accent)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{font-weight:600;color:var(--muted);font-size:12px;background:#fbfbfe;position:sticky;top:0;z-index:1}
+  tbody tr:hover{background:#fafbff}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* ---- 登录 ---- */
+  .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .login-card{width:360px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 24px;box-shadow:0 10px 30px rgba(31,35,51,.06)}
+  .login-card h1{margin:0 0 4px;font-size:19px}
+  .login-card p.hint{margin:0 0 18px;color:var(--muted);font-size:12px}
+  .login-card input{width:100%;height:38px;margin-bottom:12px}
+  .login-card button{width:100%;height:38px;background:var(--accent);border-color:var(--accent);color:#fff}
+  .login-msg{min-height:18px;margin:10px 0 0;color:var(--danger);font-size:12px}
+
+  /* ---- 顶栏 ---- */
+  .topbar{display:flex;align-items:center;gap:16px;height:52px;padding:0 16px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+  .brand{font-weight:700;font-size:14px;white-space:nowrap}
+  .views{display:flex;gap:4px}
+  .view-btn{border:0;background:transparent;color:var(--muted);padding:6px 12px;border-radius:7px}
+  .view-btn.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .stats{margin-left:auto;display:flex;gap:14px;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden}
+  .stats b{color:var(--text);font-variant-numeric:tabular-nums}
+
+  /* ---- 布局 ---- */
+  main{height:calc(100vh - 52px);overflow:hidden}
+  .view{height:100%}
+  #view-players{display:grid;grid-template-columns:290px 1fr;height:100%}
+  .sidebar{border-right:1px solid var(--line);background:#fff;display:flex;flex-direction:column;min-height:0}
+  .sidebar .search{margin:10px;flex:none}
+  .player-list{flex:1;overflow:auto;min-height:0}
+  .player-row{padding:8px 12px;border-bottom:1px solid #f0f1f8;cursor:pointer;display:grid;gap:2px}
+  .player-row:hover{background:#fafbff}
+  .player-row.active{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+  .player-row .top{display:flex;align-items:center;gap:6px;font-weight:600}
+  .player-row .sub{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:50%;background:#d5d7e3;flex:none}
+  .dot.on{background:var(--ok)}
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:8px 10px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .detail{min-width:0;display:flex;flex-direction:column;height:100%}
+  .empty{margin:auto;color:var(--muted)}
+
+  .detail-head{padding:12px 18px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .detail-head .name{font-size:16px;font-weight:700}
+  .badge{font-size:11px;padding:1px 8px;border-radius:20px;background:#f1f2f8;color:var(--muted)}
+  .badge.on{background:#e8f9f1;color:#0b8a5f}
+  .badge.room{background:#fff4e5;color:#b26a00}
+  .uuid{color:var(--muted);font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .tabs{display:flex;gap:2px;padding:8px 14px 0;background:#fff;border-bottom:1px solid var(--line);overflow:auto}
+  .tab{border:0;background:transparent;color:var(--muted);padding:7px 12px;border-radius:8px 8px 0 0;white-space:nowrap}
+  .tab.active{background:var(--bg);color:var(--accent);font-weight:600}
+  .tab-body{flex:1;overflow:auto;padding:16px 18px 40px;min-height:0}
+
+  .panel{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin-bottom:14px}
+  .panel h3{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .row:last-child{margin-bottom:0}
+  .row label{color:var(--muted);font-size:12px}
+  .grow{flex:1;min-width:160px}
+  .pick-results{max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-bottom:10px}
+  .pick-results:empty{display:none}
+  .pick-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid #f4f5fa;cursor:pointer}
+  .pick-item:last-child{border-bottom:0}
+  .pick-item:hover{background:var(--accent-soft)}
+  .pick-item .meta{color:var(--muted);font-size:11px;margin-left:auto;font-family:ui-monospace,Menlo,monospace}
+  .ico{font-size:16px;line-height:1;width:20px;text-align:center;flex:none}
+  .empty-tip{color:var(--muted);font-size:12px;padding:8px 2px}
+
+  .tab-body table input[type=number]{width:104px;text-align:right}
+  .tab-body table select{max-width:220px}
+  .muted{color:var(--muted)}
+  .ok{color:var(--ok)}
+  .warn{color:var(--danger)}
+
+  /* ---- 市场 / 日志 ---- */
+  #view-market,#view-logs{padding:16px 18px;overflow:auto;height:100%}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .table-card{background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:calc(100% - 60px)}
+
+  /* ---- 物品选择弹窗 ---- */
+  .modal{position:fixed;inset:0;background:rgba(24,26,38,.42);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px}
+  .modal-card{width:520px;max-width:100%;max-height:78vh;background:#fff;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,.2)}
+  .modal-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .modal-head .title{font-weight:600}
+  .modal-body{overflow:auto;flex:1}
+  .modal-foot{padding:10px 14px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}
+
+  /* ---- toast ---- */
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#1f2333;color:#fff;padding:9px 16px;border-radius:9px;font-size:12.5px;z-index:80;box-shadow:0 8px 24px rgba(0,0,0,.24);max-width:80vw}
+  .toast.err{background:#b91c1c}
+  .toast.ok{background:#0f766e}
+  @media(max-width:860px){
+    #view-players{grid-template-columns:1fr}
+    .sidebar{display:none}
+    .sidebar.mobile-show{display:flex;position:absolute;inset:52px 0 0;z-index:30}
+    .stats{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div id="login-view" class="login-wrap">
+  <form class="login-card" id="login-form">
+    <h1>🐱 GM 控制台</h1>
+    <p class="hint">猫猫放置 · 角色管理 / 物品发放 / 市场干预</p>
+    <input id="login-password" type="password" placeholder="管理员密码" autocomplete="current-password" required>
+    <button type="submit" id="login-submit">登录</button>
+    <p class="login-msg" id="login-msg"></p>
+  </form>
+</div>
+
+<div id="app-view" hidden>
+  <header class="topbar">
+    <div class="brand">🐱 GM 控制台</div>
+    <nav class="views">
+      <button class="view-btn active" data-view="players">角色</button>
+      <button class="view-btn" data-view="market">市场</button>
+      <button class="view-btn" data-view="logs">操作日志</button>
+    </nav>
+    <div class="stats" id="stats"></div>
+    <button class="ghost" id="logout">退出</button>
+  </header>
+
+  <main>
+    <section class="view" id="view-players">
+      <aside class="sidebar" id="sidebar">
+        <input class="search" id="player-search" placeholder="搜索昵称 / 邮箱 / uuid">
+        <div class="player-list" id="player-list"></div>
+        <div class="pager">
+          <button id="page-prev">上一页</button>
+          <span id="page-info">-</span>
+          <button id="page-next">下一页</button>
+        </div>
+      </aside>
+      <section class="detail" id="detail">
+        <div class="empty">选择左侧角色查看/修改</div>
+      </section>
+    </section>
+
+    <section class="view" id="view-market" hidden>
+      <div class="toolbar">
+        <select id="market-status">
+          <option value="open">开放中</option>
+          <option value="closed">已结束</option>
+          <option value="">全部</option>
+        </select>
+        <select id="market-type">
+          <option value="">全部类型</option>
+          <option value="sell">出售</option>
+          <option value="buy">求购</option>
+        </select>
+        <button id="market-refresh">刷新</button>
+        <span class="muted" id="market-count"></span>
+      </div>
+      <div class="table-card">
+        <table>
+          <thead><tr><th>类型</th><th>物品</th><th>总量 / 已成交</th><th>单价</th><th>状态</th><th>玩家</th><th>创建时间</th><th></th></tr></thead>
+          <tbody id="market-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view" id="view-logs" hidden>
+      <div class="toolbar">
+        <button id="logs-refresh">刷新</button>
+        <span class="muted">最近 100 条后台操作（存在内存里，重启后清空）</span>
+      </div>
+      <div class="table-card">
+        <table>
+          <thead><tr><th style="width:170px">时间</th><th style="width:140px">动作</th><th>详情</th></tr></thead>
+          <tbody id="logs-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="picker" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <span class="title" id="picker-title">选择物品</span>
+      <input class="grow" id="picker-search" placeholder="搜索名称或 id">
+    </div>
+    <div class="modal-body" id="picker-list"></div>
+    <div class="modal-foot"><button id="picker-close">关闭</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const STATUS_LABELS = {
+    attacking: "攻击", battle: "战斗", collecting: "采集", cooking: "烹饪", defencing: "防御",
+    dexterity: "灵巧", enhance: "强化", exploring: "探索", farmingAnimal: "养殖", farmingPlant: "种植",
+    fishing: "钓鱼", forging: "锻造", intelligence: "智力", knowledge: "知识", luck: "幸运",
+    manufacturing: "制造", mining: "采矿", mysterious: "神秘", sewing: "缝纫", stamina: "耐力",
+    strength: "力量", trading: "交易"
+  };
+  const SLOT_LABELS = {
+    cloak: "披风", head: "头部", body: "身体", arm: "手臂", leg: "腿部", foot: "脚部",
+    leftHand: "左手", rightHand: "右手", leftHand2: "左手Ⅱ", rightHand2: "右手Ⅱ"
+  };
+  const EQUIP_SLOTS = ["cloak", "head", "body", "arm", "leg", "foot", "leftHand", "rightHand", "leftHand2", "rightHand2"];
+  for (let i = 1; i <= 9; i += 1) EQUIP_SLOTS.push("decorate" + i);
+  const slotLabel = (slot) => SLOT_LABELS[slot] || (slot.startsWith("decorate") ? "饰品" + slot.slice(8) : slot);
+
+  // 资源表里 1700 多条物品的 icon 是 `resource:xxx` 这种图片 key（图片在正式站点上，本地没有），
+  // 直接显示会变成 "resource:catPawFossil" 这样的文本，这里按分类退回一个 emoji。
+  const CATEGORY_ICONS = {
+    Currency: "💰", Material: "🪵", Equipment: "🗡", Tool: "🔧", Food: "🍖", FishBait: "🎣",
+    Medicine: "💊", Chest: "🎁", Consumable: "🧪", Plantable: "🌱", SimpleBook: "📖",
+    Experience: "✨", EnemySpoil: "🦴", Magic: "🔮", KittyFurniture: "🪑", Building: "🏠",
+    Quest: "📜", Special: "⭐", Other: "📦", SponsorPointItem: "💎", Pact: "📃"
+  };
+
+  const state = {
+    catalog: new Map(),
+    catalogList: [],
+    statusKeys: [],
+    view: "players",
+    players: [],
+    total: 0,
+    page: 1,
+    pageSize: 20,
+    query: "",
+    player: null,
+    tab: "grant",
+    draft: [],
+    equipDraft: null,
+    grantQuery: "",
+    bagQuery: ""
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const fmt = (n) => Number(n || 0).toLocaleString("zh-CN");
+  const pct = (v) => Math.round(Number(v || 0) * 100) / 100;
+  function iconOf(id) {
+    const item = state.catalog.get(id);
+    if (!item) return "❔";
+    const icon = String(item.icon || "");
+    if (icon && !icon.includes(":")) return icon;
+    for (const category of item.category || []) {
+      if (CATEGORY_ICONS[category]) return CATEGORY_ICONS[category];
+    }
+    return "📦";
+  }
+  const nameOf = (id) => (state.catalog.get(id) || {}).name || id;
+
+  let toastTimer = null;
+  function toast(message, kind = "") {
+    const node = $("toast");
+    node.textContent = message;
+    node.className = "toast " + kind;
+    node.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { node.hidden = true; }, kind === "err" ? 4200 : 2400);
+  }
+
+  async function api(path, options = {}) {
+    const init = { credentials: "same-origin", headers: {} };
+    if (options.method) init.method = options.method;
+    if (options.body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(options.body);
+    }
+    const res = await fetch(path, init);
+    let payload = null;
+    try { payload = await res.json(); } catch { /* 非 JSON（例如 502） */ }
+    if (!res.ok || (payload && payload.code && payload.code !== 200)) {
+      const error = new Error(payload?.message || payload?.msg || `请求失败（${res.status}）`);
+      error.status = res.status;
+      throw error;
+    }
+    return payload ? payload.data : null;
+  }
+
+  /* ---------- 登录 ---------- */
+  function showLogin(message = "") {
+    $("app-view").hidden = true;
+    $("login-view").hidden = false;
+    $("login-msg").textContent = message;
+  }
+  function showApp() {
+    $("login-view").hidden = true;
+    $("app-view").hidden = false;
+  }
+
+  $("login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("login-submit");
+    button.disabled = true;
+    $("login-msg").textContent = "";
+    try {
+      await api("/api/gm/login", { method: "POST", body: { password: $("login-password").value } });
+      $("login-password").value = "";
+      await boot();
+    } catch (error) {
+      $("login-msg").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  $("logout").addEventListener("click", async () => {
+    try { await api("/api/gm/session", { method: "DELETE" }); } catch {}
+    state.player = null;
+    showLogin("已退出登录");
+  });
+
+  /* ---------- 概览 ---------- */
+  async function refreshOverview() {
+    try {
+      const data = await api("/api/gm/overview");
+      $("stats").innerHTML =
+        `<span>玩家 <b>${fmt(data.playerCount)}</b></span>` +
+        `<span>在线 <b>${fmt(data.onlineCount)}</b></span>` +
+        `<span>挂单 卖 <b>${fmt(data.openSellCount)}</b> / 买 <b>${fmt(data.openBuyCount)}</b></span>` +
+        `<span>战斗房 <b>${fmt(data.roomCount || 0)}</b></span>`;
+    } catch (error) {
+      if (error.status === 401) showLogin("登录已过期，请重新登录");
+    }
+  }
+
+  /* ---------- 角色列表 ---------- */
+  async function loadPlayers() {
+    try {
+      const data = await api(`/api/gm/players?q=${encodeURIComponent(state.query)}&page=${state.page}&pageSize=${state.pageSize}`);
+      state.players = data.items || [];
+      state.total = data.total || 0;
+      renderPlayers();
+    } catch (error) {
+      if (error.status === 401) return showLogin("登录已过期，请重新登录");
+      toast(error.message, "err");
+    }
+  }
+
+  function renderPlayers() {
+    const list = $("player-list");
+    if (!state.players.length) {
+      list.innerHTML = `<div class="empty-tip" style="padding:14px">没有匹配的角色</div>`;
+    } else {
+      list.innerHTML = state.players.map((player) => `
+        <div class="player-row ${state.player?.uuid === player.uuid ? "active" : ""}" data-uuid="${esc(player.uuid)}">
+          <div class="top"><span class="dot ${player.online ? "on" : ""}"></span><span>${esc(player.name)}</span>
+            ${player.online ? `<span class="badge on">在线</span>` : ""}</div>
+          <div class="sub">${esc(player.email)}</div>
+          <div class="sub">💰 ${fmt(player.resources?.gold)} · 物品 ${fmt(player.inventoryCount)}</div>
+        </div>`).join("");
+    }
+    const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+    $("page-info").textContent = `第 ${state.page} / ${pages} 页 · 共 ${state.total} 人`;
+    $("page-prev").disabled = state.page <= 1;
+    $("page-next").disabled = state.page >= pages;
+  }
+
+  $("player-list").addEventListener("click", (event) => {
+    const row = event.target.closest(".player-row");
+    if (!row) return;
+    openPlayer(row.dataset.uuid);
+  });
+
+  let searchTimer = null;
+  $("player-search").addEventListener("input", (event) => {
+    state.query = event.target.value.trim();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { state.page = 1; loadPlayers(); }, 220);
+  });
+  $("page-prev").addEventListener("click", () => { if (state.page > 1) { state.page -= 1; loadPlayers(); } });
+  $("page-next").addEventListener("click", () => { state.page += 1; loadPlayers(); });
+
+  async function openPlayer(uuid) {
+    try {
+      const data = await api(`/api/gm/players/${encodeURIComponent(uuid)}`);
+      state.player = data;
+      state.draft = [];
+      state.equipDraft = {
+        work: { ...(data.workEquipment || {}) },
+        battle: { ...(data.battleEquipment || {}) }
+      };
+      state.grantQuery = "";
+      state.bagQuery = "";
+      renderPlayers();
+      renderDetail();
+    } catch (error) {
+      toast(error.message, "err");
+    }
+  }
+
+  async function reloadPlayer() {
+    if (!state.player) return;
+    const uuid = state.player.uuid;
+    const data = await api(`/api/gm/players/${encodeURIComponent(uuid)}`);
+    state.player = data;
+    state.equipDraft = { work: { ...(data.workEquipment || {}) }, battle: { ...(data.battleEquipment || {}) } };
+    renderDetail();
+    loadPlayers();
+  }
+
+  /* ---------- 角色详情 ---------- */
+  function renderDetail() {
+    const player = state.player;
+    const root = $("detail");
+    if (!player) {
+      root.innerHTML = `<div class="empty">选择左侧角色查看/修改</div>`;
+      return;
+    }
+    const tabs = [
+      ["grant", "物品发放"], ["resources", "货币/资源"], ["bag", "背包"],
+      ["equipment", "装备"], ["attributes", "属性"], ["actions", "角色操作"]
+    ];
+    root.innerHTML = `
+      <div class="detail-head">
+        <span class="name">${esc(player.name)}</span>
+        ${player.online ? `<span class="badge on">在线</span>` : `<span class="badge">离线</span>`}
+        ${player.battleRoom ? `<span class="badge room">战斗中</span>` : ""}
+        <span class="badge">💰 ${fmt(player.resources?.gold)}</span>
+        <span class="badge">物品 ${fmt(player.inventoryCount)}</span>
+        <span class="uuid">${esc(player.uuid)} <button class="ghost" id="copy-uuid" style="padding:0 5px;font-size:11px">复制</button></span>
+        <button class="ghost" id="reload-player" title="从服务器重新读取这个角色（游戏里刚发生的变动也能拉到）" style="margin-left:auto">刷新</button>
+      </div>
+      <nav class="tabs">
+        ${tabs.map(([id, label]) => `<button class="tab ${state.tab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}
+      </nav>
+      <div class="tab-body" id="tab-body"></div>`;
+
+    $("copy-uuid").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(player.uuid); toast("uuid 已复制", "ok"); }
+      catch { toast("复制失败，请手动选中", "err"); }
+    });
+    $("reload-player").addEventListener("click", async () => {
+      try { await reloadPlayer(); toast("已刷新", "ok"); }
+      catch (error) { toast(error.message, "err"); }
+    });
+    root.querySelector(".tabs").addEventListener("click", (event) => {
+      const button = event.target.closest(".tab");
+      if (!button) return;
+      state.tab = button.dataset.tab;
+      renderDetail();
+    });
+    renderTab();
+  }
+
+  function renderTab() {
+    const body = $("tab-body");
+    if (!body) return;
+    if (state.tab === "grant") return renderGrantTab(body);
+    if (state.tab === "resources") return renderResourcesTab(body);
+    if (state.tab === "bag") return renderBagTab(body);
+    if (state.tab === "equipment") return renderEquipmentTab(body);
+    if (state.tab === "attributes") return renderAttributesTab(body);
+    if (state.tab === "actions") return renderActionsTab(body);
+  }
+
+  /* ---------- 发放 ---------- */
+  function grantMatches(query, limit = 40) {
+    const term = query.trim().toLowerCase();
+    let list = state.catalogList;
+    if (term) {
+      list = list.filter((item) => item.name.toLowerCase().includes(term) || item.id.toLowerCase().includes(term));
+    }
+    return list.slice(0, limit);
+  }
+
+  function renderGrantTab(body) {
+    const player = state.player;
+    body.innerHTML = `
+      <div class="panel">
+        <h3>发放 / 扣除物品（正数发放，负数扣除，提交时整体校验）</h3>
+        <div class="row">
+          <label>数量</label>
+          <input type="number" id="grant-count" value="1" min="1" style="width:120px;text-align:right">
+          <input class="grow" id="grant-search" placeholder="搜索物品：名称或 id，例如 金币 / catPawStamp" value="${esc(state.grantQuery)}">
+        </div>
+        <div class="pick-results" id="grant-results"></div>
+        <div class="row">
+          <label class="muted">快捷：</label>
+          <button data-quick-gold="100000">金币 +10万</button>
+          <button data-quick-gold="10000">金币 +1万</button>
+          <button data-quick="catPawStamp:10">猫爪印章 +10</button>
+          <button data-quick="cutePoint:100">心意点数 +100</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>待提交清单（<span id="draft-count">${state.draft.length}</span> 条）</h3>
+        <div id="draft-wrap"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="draft-submit">发放</button>
+          <button class="danger" id="draft-deduct">扣除</button>
+          <button class="ghost" id="draft-clear">清空</button>
+        </div>
+        <p class="empty-tip">当前金币 ${fmt(player.resources?.gold)}，物品共 ${fmt(player.inventoryCount)} 件。发放后即时落盘并推送给在线客户端。</p>
+      </div>`;
+
+    renderGrantResults();
+    renderDraft();
+
+    $("grant-search").addEventListener("input", (event) => {
+      state.grantQuery = event.target.value;
+      renderGrantResults();
+    });
+    $("grant-results").addEventListener("click", (event) => {
+      const item = event.target.closest(".pick-item");
+      if (!item) return;
+      const count = Math.trunc(Number($("grant-count").value) || 0);
+      if (!count) return toast("数量不合法", "err");
+      addToDraft(item.dataset.id, count);
+    });
+    body.querySelectorAll("[data-quick]").forEach((button) => button.addEventListener("click", () => {
+      const [id, count] = button.dataset.quick.split(":");
+      addToDraft(id, Number(count) || 1);
+    }));
+    body.querySelectorAll("[data-quick-gold]").forEach((button) => button.addEventListener("click", () => {
+      addToDraft("gold", Number(button.dataset.quickGold));
+    }));
+
+    $("draft-submit").addEventListener("click", () => submitDraft(1));
+    $("draft-deduct").addEventListener("click", () => submitDraft(-1));
+    $("draft-clear").addEventListener("click", () => { state.draft = []; renderDraft(); });
+  }
+
+  function renderGrantResults() {
+    const wrap = $("grant-results");
+    if (!wrap) return;
+    const list = grantMatches(state.grantQuery);
+    wrap.innerHTML = list.map((item) => `
+      <div class="pick-item" data-id="${esc(item.id)}">
+        <span class="ico">${esc(iconOf(item.id))}</span>
+        <span>${esc(item.name)}</span>
+        <span class="meta">${esc(item.id)}</span>
+      </div>`).join("");
+  }
+
+  function addToDraft(resourceId, count) {
+    const existing = state.draft.find((entry) => entry.resourceId === resourceId);
+    if (existing) existing.count += count;
+    else state.draft.push({ resourceId, count });
+    renderDraft();
+    toast(`已加入清单：${nameOf(resourceId)} × ${count}`);
+  }
+
+  function renderDraft() {
+    const wrap = $("draft-wrap");
+    if (!wrap) return;
+    const counter = $("draft-count");
+    if (counter) counter.textContent = state.draft.length;
+    if (!state.draft.length) {
+      wrap.innerHTML = `<p class="empty-tip">清单为空：先在搜索框里点选物品</p>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <table>
+        <thead><tr><th>物品</th><th>数量</th><th></th></tr></thead>
+        <tbody>
+          ${state.draft.map((entry, index) => `
+            <tr>
+              <td><span class="ico">${esc(iconOf(entry.resourceId))}</span>${esc(nameOf(entry.resourceId))}
+                <span class="muted" style="font-size:11px">${esc(entry.resourceId)}</span></td>
+              <td><input type="number" data-draft-count="${index}" value="${entry.count}"></td>
+              <td><button class="ghost" data-draft-remove="${index}">移除</button></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>`;
+    wrap.querySelectorAll("[data-draft-count]").forEach((input) => input.addEventListener("change", () => {
+      const index = Number(input.dataset.draftCount);
+      const value = Math.trunc(Number(input.value) || 0);
+      if (value) state.draft[index].count = value;
+      else { state.draft.splice(index, 1); renderDraft(); }
+    }));
+    wrap.querySelectorAll("[data-draft-remove]").forEach((button) => button.addEventListener("click", () => {
+      state.draft.splice(Number(button.dataset.draftRemove), 1);
+      renderDraft();
+    }));
+  }
+
+  async function submitDraft(sign) {
+    if (!state.draft.length) return toast("清单为空", "err");
+    const items = state.draft.map((entry) => ({ resourceId: entry.resourceId, count: Math.abs(entry.count) * sign }));
+    try {
+      const result = await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}/grant`, { method: "POST", body: { items } });
+      const lines = result.applied.map((entry) => `${nameOf(entry.resourceId)} ${entry.count > 0 ? "+" : ""}${fmt(entry.count)}`);
+      toast(`${sign > 0 ? "发放" : "扣除"}完成：${lines.join("、")}`, "ok");
+      state.draft = [];
+      await reloadPlayer();
+    } catch (error) {
+      toast(error.message, "err");
+    }
+  }
+
+  /* ---------- 资源 ---------- */
+  function renderResourcesTab(body) {
+    const player = state.player;
+    body.innerHTML = `
+      <div class="panel">
+        <h3>货币 / 基础资源（金币会同时写入 inventory.gold 与 resources.gold）</h3>
+        <table>
+          <thead><tr><th>资源</th><th style="width:180px">数量</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="ico">💰</span>金币 <span class="muted" style="font-size:11px">gold</span></td>
+              <td><input type="number" id="res-gold" value="${Number(player.resources?.gold) || 0}" min="0"></td>
+              <td class="muted">背包里也显示为 ${fmt(player.inventory?.gold?.count)}</td>
+            </tr>
+            <tr>
+              <td><span class="ico">🍚</span>粮食 <span class="muted" style="font-size:11px">food</span></td>
+              <td><input type="number" id="res-food" value="${Number(player.resources?.food) || 0}" min="0"></td>
+              <td class="muted">老存档字段，前端已不读</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="row" style="margin-top:12px"><button class="primary" id="res-save">保存</button></div>
+      </div>`;
+    $("res-save").addEventListener("click", async () => {
+      try {
+        await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}`, {
+          method: "PATCH",
+          body: { resources: { gold: Math.trunc(Number($("res-gold").value) || 0), food: Math.trunc(Number($("res-food").value) || 0) } }
+        });
+        toast("资源已保存", "ok");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    });
+  }
+
+  /* ---------- 背包 ---------- */
+  function renderBagTab(body) {
+    const inventory = state.player.inventory || {};
+    const term = state.bagQuery.trim().toLowerCase();
+    const rows = Object.entries(inventory)
+      .filter(([id, entry]) => Number(entry?.count) !== 0)
+      .map(([id, entry]) => ({ id, count: Number(entry?.count) || 0 }))
+      .filter((row) => !term || row.id.toLowerCase().includes(term) || nameOf(row.id).toLowerCase().includes(term))
+      .sort((left, right) => right.count - left.count);
+
+    body.innerHTML = `
+      <div class="panel">
+        <div class="row">
+          <input class="grow" id="bag-search" placeholder="搜索背包物品（名称或 id）" value="${esc(state.bagQuery)}">
+          <span class="muted">共 ${fmt(rows.length)} 种</span>
+        </div>
+        <div style="max-height:calc(100vh - 330px);overflow:auto">
+          <table>
+            <thead><tr><th>物品</th><th style="width:150px">数量</th><th style="width:150px"></th></tr></thead>
+            <tbody>
+              ${rows.length ? rows.map((row) => `
+                <tr>
+                  <td><span class="ico">${esc(iconOf(row.id))}</span>${esc(nameOf(row.id))}
+                    <span class="muted" style="font-size:11px">${esc(row.id)}</span></td>
+                  <td><input type="number" data-bag-input="${esc(row.id)}" value="${row.count}" min="0"></td>
+                  <td>
+                    <button data-bag-save="${esc(row.id)}">保存</button>
+                    <button class="danger" data-bag-clear="${esc(row.id)}">清空</button>
+                  </td>
+                </tr>`).join("") : `<tr><td colspan="3" class="empty-tip">没有匹配的物品</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    $("bag-search").addEventListener("input", (event) => {
+      state.bagQuery = event.target.value;
+      renderBagTab(body);
+      const input = $("bag-search");
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    const setCount = async (id, count) => {
+      try {
+        await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}`, { method: "PATCH", body: { inventory: { [id]: count } } });
+        toast(`${nameOf(id)} → ${fmt(count)}`, "ok");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    };
+    body.querySelectorAll("[data-bag-save]").forEach((button) => button.addEventListener("click", () => {
+      const id = button.dataset.bagSave;
+      const input = body.querySelector(`[data-bag-input="${CSS.escape(id)}"]`);
+      setCount(id, Math.max(0, Math.trunc(Number(input.value) || 0)));
+    }));
+    body.querySelectorAll("[data-bag-clear]").forEach((button) => button.addEventListener("click", () => {
+      const id = button.dataset.bagClear;
+      if (!confirm(`确定清空「${nameOf(id)}」？`)) return;
+      setCount(id, 0);
+    }));
+  }
+
+  /* ---------- 装备 ---------- */
+  function renderEquipmentTab(body) {
+    const renderCard = (type, title) => {
+      const draft = state.equipDraft[type];
+      return `
+        <div class="panel">
+          <h3>${title}（${Object.keys(draft).length} 件在身）</h3>
+          <table>
+            <tbody>
+              ${EQUIP_SLOTS.map((slot) => {
+                const resourceId = draft[slot] || "";
+                return `<tr>
+                  <td style="width:90px" class="muted">${slotLabel(slot)}</td>
+                  <td>${resourceId ? `<span class="ico">${esc(iconOf(resourceId))}</span>${esc(nameOf(resourceId))}
+                      <span class="muted" style="font-size:11px">${esc(resourceId)}</span>` : `<span class="muted">空</span>`}</td>
+                  <td style="width:150px;text-align:right">
+                    <button data-equip-pick="${type}:${slot}">${resourceId ? "替换" : "装备"}</button>
+                    ${resourceId ? `<button class="danger" data-equip-clear="${type}:${slot}">卸下</button>` : ""}
+                  </td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>`;
+    };
+    body.innerHTML = `
+      <div class="panel" style="background:#fbfbfe">
+        <div class="row" style="margin:0">
+          <button class="primary" id="equip-save">保存装备栏</button>
+          <span class="muted">保存会整体覆盖：被换下/卸下的装备自动退回背包，不会凭空消失。</span>
+        </div>
+      </div>
+      ${renderCard("work", "生活装备")}
+      ${renderCard("battle", "战斗装备")}`;
+
+    body.querySelectorAll("[data-equip-pick]").forEach((button) => button.addEventListener("click", () => {
+      const [type, slot] = button.dataset.equipPick.split(":");
+      openPicker({
+        title: `选择${type === "battle" ? "战斗" : "生活"}装备 → ${slotLabel(slot)}`,
+        filter: (item) => (item.equipmentType || []).includes(type),
+        onPick: (item) => {
+          state.equipDraft[type][slot] = item.id;
+          renderEquipmentTab(body);
+        }
+      });
+    }));
+    body.querySelectorAll("[data-equip-clear]").forEach((button) => button.addEventListener("click", () => {
+      const [type, slot] = button.dataset.equipClear.split(":");
+      delete state.equipDraft[type][slot];
+      renderEquipmentTab(body);
+    }));
+    $("equip-save").addEventListener("click", async () => {
+      try {
+        await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}`, {
+          method: "PATCH",
+          body: { workEquipment: state.equipDraft.work, battleEquipment: state.equipDraft.battle }
+        });
+        toast("装备栏已保存", "ok");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    });
+  }
+
+  /* ---------- 属性 ---------- */
+  function renderAttributesTab(body) {
+    const status = state.player.status || {};
+    const keys = state.statusKeys.length ? state.statusKeys : Object.keys(status);
+    body.innerHTML = `
+      <div class="panel">
+        <h3>属性等级 / 当前等级内经验（改经验会按阈值自动升级）</h3>
+        <table>
+          <thead><tr><th>属性</th><th style="width:80px">等级</th><th style="width:170px">当前经验</th><th style="width:100px"></th></tr></thead>
+          <tbody>
+            ${keys.map((key) => {
+              const row = status[key] || {};
+              return `<tr>
+                <td>${esc(STATUS_LABELS[key] || key)} <span class="muted" style="font-size:11px">${esc(key)}</span></td>
+                <td class="num">${fmt(row.level || 1)}</td>
+                <td><input type="number" step="0.01" min="0" data-exp-input="${esc(key)}" value="${pct(row.currentExp || 0)}"></td>
+                <td><button data-exp-save="${esc(key)}">保存</button></td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>`;
+    body.querySelectorAll("[data-exp-save]").forEach((button) => button.addEventListener("click", async () => {
+      const key = button.dataset.expSave;
+      const input = body.querySelector(`[data-exp-input="${CSS.escape(key)}"]`);
+      try {
+        await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}`, {
+          method: "PATCH",
+          body: { experience: { [key]: Math.max(0, Number(input.value) || 0) } }
+        });
+        toast(`${STATUS_LABELS[key] || key} 经验已保存`, "ok");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    }));
+  }
+
+  /* ---------- 角色操作 ---------- */
+  function renderActionsTab(body) {
+    const player = state.player;
+    body.innerHTML = `
+      <div class="panel">
+        <h3>基本信息</h3>
+        <table>
+          <tbody>
+            <tr><td class="muted" style="width:110px">uuid</td><td class="uuid">${esc(player.uuid)}</td></tr>
+            <tr><td class="muted">邮箱</td><td>${esc(player.email)}</td></tr>
+            <tr><td class="muted">创建时间</td><td>${esc(new Date(player.createdAt).toLocaleString("zh-CN"))}</td></tr>
+            <tr><td class="muted">在线状态</td><td>${player.online ? '<span class="ok">在线</span>' : "离线"}</td></tr>
+            <tr><td class="muted">战斗房间</td><td>${player.battleRoom ? esc(player.battleRoom.uuid || "已加入") : "未加入"}</td></tr>
+            <tr><td class="muted">任务 / 背包</td><td>${fmt(player.taskCount)} 条任务 · ${fmt(player.inventoryCount)} 件物品</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h3>修改昵称</h3>
+        <div class="row">
+          <input class="grow" id="rename-input" value="${esc(player.name)}" maxlength="24">
+          <button class="primary" id="rename-save">保存昵称</button>
+        </div>
+        <p class="empty-tip">改昵称会同步到账号表和组队/公会显示。</p>
+      </div>
+      <div class="panel">
+        <h3>强制下线</h3>
+        <div class="row">
+          <button class="danger" id="kick">踢下线</button>
+          <span class="muted">只断开当前连接，不清存档；玩家可立即重新登录。</span>
+        </div>
+      </div>`;
+    $("rename-save").addEventListener("click", async () => {
+      try {
+        await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}`, { method: "PATCH", body: { name: $("rename-input").value.trim() } });
+        toast("昵称已更新", "ok");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    });
+    $("kick").addEventListener("click", async () => {
+      if (!confirm(`确定把「${state.player.name}」踢下线？`)) return;
+      try {
+        const result = await api(`/api/gm/players/${encodeURIComponent(state.player.uuid)}/kick`, { method: "POST" });
+        toast(result.kicked ? `已断开 ${result.kicked} 条连接` : "该玩家当前没有在线连接", result.kicked ? "ok" : "");
+        await reloadPlayer();
+      } catch (error) { toast(error.message, "err"); }
+    });
+  }
+
+  /* ---------- 物品选择弹窗 ---------- */
+  let pickerState = { filter: () => true, onPick: null };
+  function openPicker({ title, filter, onPick }) {
+    pickerState = { filter: filter || (() => true), onPick };
+    $("picker-title").textContent = title || "选择物品";
+    $("picker").hidden = false;
+    $("picker-search").value = "";
+    renderPicker();
+    $("picker-search").focus();
+  }
+  function renderPicker() {
+    const term = $("picker-search").value.trim().toLowerCase();
+    const list = state.catalogList
+      .filter(pickerState.filter)
+      .filter((item) => !term || item.name.toLowerCase().includes(term) || item.id.toLowerCase().includes(term))
+      .slice(0, 80);
+    $("picker-list").innerHTML = list.length ? list.map((item) => `
+      <div class="pick-item" data-id="${esc(item.id)}">
+        <span class="ico">${esc(iconOf(item.id))}</span>
+        <span>${esc(item.name)}</span>
+        <span class="meta">${esc(item.id)}</span>
+      </div>`).join("") : `<p class="empty-tip" style="padding:12px">没有匹配的物品</p>`;
+  }
+  $("picker-search").addEventListener("input", renderPicker);
+  $("picker-close").addEventListener("click", () => { $("picker").hidden = true; });
+  $("picker").addEventListener("click", (event) => {
+    if (event.target === $("picker")) $("picker").hidden = true;
+    const item = event.target.closest(".pick-item");
+    if (!item) return;
+    const entry = state.catalog.get(item.dataset.id);
+    $("picker").hidden = true;
+    if (entry && pickerState.onPick) pickerState.onPick(entry);
+  });
+
+  /* ---------- 市场 ---------- */
+  async function loadMarket() {
+    try {
+      const status = $("market-status").value;
+      const type = $("market-type").value;
+      const data = await api(`/api/gm/market?status=${encodeURIComponent(status)}&type=${encodeURIComponent(type)}`);
+      const items = data.items || [];
+      $("market-count").textContent = `共 ${items.length} 条`;
+      $("market-body").innerHTML = items.length ? items.map((trade) => {
+        const isSell = trade.type === "sell";
+        const resourceId = isSell ? trade.sellResourceId : trade.requireResourceId;
+        const total = isSell ? trade.sellResourceCount : trade.requireResourceCount;
+        const done = isSell ? trade.selledResourceCount : trade.doneResourceCount;
+        const priceId = isSell ? trade.costResourceId : trade.payResourceId;
+        const unit = isSell ? trade.costPerUnit : trade.payPerUnit;
+        return `<tr>
+          <td><span class="badge ${isSell ? "on" : ""}">${isSell ? "出售" : "求购"}</span></td>
+          <td><span class="ico">${esc(iconOf(resourceId))}</span>${esc(nameOf(resourceId))}</td>
+          <td class="num">${fmt(total)} / ${fmt(done)}</td>
+          <td class="num">${fmt(unit)} ${esc(iconOf(priceId))}</td>
+          <td>${trade.isClosed ? '<span class="muted">已结束</span>' : '<span class="ok">开放中</span>'}</td>
+          <td>${esc(trade.ownerName)}</td>
+          <td class="muted">${esc(new Date(trade.createTime).toLocaleString("zh-CN"))}</td>
+          <td>${trade.isClosed ? "" : `<button class="danger" data-cancel="${esc(trade.tradeUuid)}">撤单</button>`}</td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="8" class="empty-tip">没有订单</td></tr>`;
+
+      $("market-body").querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", async () => {
+        if (!confirm("撤单后未成交部分会退回玩家（卖方退物品、买方退托管货币），确定？")) return;
+        try {
+          await api(`/api/gm/market/${encodeURIComponent(button.dataset.cancel)}/cancel`, { method: "POST" });
+          toast("已撤单", "ok");
+          loadMarket();
+        } catch (error) { toast(error.message, "err"); }
+      }));
+    } catch (error) {
+      if (error.status === 401) return showLogin("登录已过期，请重新登录");
+      toast(error.message, "err");
+    }
+  }
+
+  /* ---------- 日志 ---------- */
+  async function loadLogs() {
+    try {
+      const data = await api("/api/gm/logs");
+      const items = data.items || [];
+      const actionLabel = { grant: "物品发放", kick: "强制下线", "market-cancel": "撤销订单" };
+      $("logs-body").innerHTML = items.length ? items.map((log) => {
+        const detail = log.detail || {};
+        let text = "";
+        if (log.action === "grant") {
+          text = `${esc(detail.player)}（${esc(String(detail.uuid || "").slice(0, 8))}）` +
+            (detail.items || []).map((entry) => `${esc(nameOf(entry.resourceId))} ${entry.count > 0 ? "+" : ""}${fmt(entry.count)}`).join("、");
+        } else if (log.action === "kick") {
+          text = `${esc(detail.player)} 断开 ${fmt(detail.sockets)} 条连接`;
+        } else if (log.action === "market-cancel") {
+          text = `订单 ${esc(detail.tradeUuid)} · ${detail.type === "sell" ? "出售" : "求购"} · ${esc(detail.owner)}`;
+        } else {
+          text = esc(JSON.stringify(detail));
+        }
+        return `<tr>
+          <td class="muted">${esc(new Date(log.at).toLocaleString("zh-CN"))}</td>
+          <td>${esc(actionLabel[log.action] || log.action)}</td>
+          <td>${text}</td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="3" class="empty-tip">还没有操作记录</td></tr>`;
+    } catch (error) {
+      if (error.status === 401) return showLogin("登录已过期，请重新登录");
+      toast(error.message, "err");
+    }
+  }
+
+  /* ---------- 视图切换 ---------- */
+  function switchView(view) {
+    state.view = view;
+    document.querySelectorAll(".view-btn").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+    $("view-players").hidden = view !== "players";
+    $("view-market").hidden = view !== "market";
+    $("view-logs").hidden = view !== "logs";
+    if (view === "market") loadMarket();
+    if (view === "logs") loadLogs();
+  }
+  document.querySelectorAll(".view-btn").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $("market-refresh").addEventListener("click", loadMarket);
+  $("market-status").addEventListener("change", loadMarket);
+  $("market-type").addEventListener("change", loadMarket);
+  $("logs-refresh").addEventListener("click", loadLogs);
+
+  /* ---------- 启动 ---------- */
+  async function boot() {
+    const session = await api("/api/gm/session");
+    if (!session?.authenticated) return showLogin("");
+    const catalog = await api("/api/gm/catalog");
+    state.catalogList = catalog.items || [];
+    state.catalog = new Map(state.catalogList.map((item) => [item.id, item]));
+    state.statusKeys = catalog.statusKeys || [];
+    showApp();
+    refreshOverview();
+    loadPlayers();
+  }
+
+  (async () => {
+    try {
+      await boot();
+    } catch (error) {
+      if (error.status === 401) return showLogin("");
+      showLogin(error.message || "初始化失败");
+    }
+  })();
+
+  setInterval(() => {
+    if ($("app-view").hidden) return;
+    // 只刷概览和列表；详情页有自己的刷新时机，定时重建会把正在填的清单/输入框冲掉
+    refreshOverview();
+    loadPlayers();
+  }, 20000);
+})();
+</script>
+</body>
+</html>

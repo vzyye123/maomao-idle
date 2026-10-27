@@ -358,7 +358,8 @@ function safePlayerSummary(player) {
     name: player.name,
     createdAt: player.createdAt,
     resources: player.resources,
-    inventoryCount: Object.values(player.inventory || {}).reduce((sum, item) => sum + (Number(item?.count) || 0), 0),
+    // 金币单独计入 resources，这里只统计背包里的实物，避免列表里「物品 1,400」这种误导
+    inventoryCount: Object.entries(player.inventory || {}).reduce((sum, [resourceId, item]) => (resourceId === "gold" ? sum : sum + (Number(item?.count) || 0)), 0),
     taskCount: player.taskQueue?.length || 0,
     currentBattleRoomId: player.currentBattleRoomId || null
   };
@@ -1104,36 +1105,48 @@ app.post("/api/gm/login", (req, res) => {
   res.setHeader("Set-Cookie", `maomao_gm_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800`);
   return res.json({ code: 200, data: { authenticated: true, expiresIn: 28800 } });
 });
-app.get("/api/gm/session", requireGM, (_req, res) => ok(res, { authenticated: true, expiresAt: new Date(req.gmSession.expiresAt).toISOString() }));
+app.get("/api/gm/session", requireGM, (req, res) => ok(res, { authenticated: true, expiresAt: new Date(req.gmSession.expiresAt).toISOString() }));
 app.delete("/api/gm/session", requireGM, (req, res) => {
   const token = parseCookies(req.headers.cookie).maomao_gm_session;
   if (token) gmSessions.delete(token);
   res.setHeader("Set-Cookie", "maomao_gm_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
   return res.json({ code: 200, data: { authenticated: false } });
 });
+function gmOnlineUuids() {
+  return new Set([...io.sockets.sockets.values()].map((socket) => socket.player?.uuid).filter(Boolean));
+}
+
 app.get("/api/gm/overview", requireGM, (_req, res) => {
   const openTrades = [...marketTrades.values()].filter((trade) => trade.status === "open");
   return ok(res, {
     playerCount: players.size,
-    onlineCount: new Set([...io.sockets.sockets.values()].map((socket) => socket.player?.uuid).filter(Boolean)).size,
+    onlineCount: gmOnlineUuids().size,
     openSellCount: openTrades.filter((trade) => trade.type === "sell").length,
-    openBuyCount: openTrades.filter((trade) => trade.type === "buy").length
+    openBuyCount: openTrades.filter((trade) => trade.type === "buy").length,
+    roomCount: battleRooms.size
   });
 });
 app.get("/api/gm/players", requireGM, (req, res) => {
   const query = String(req.query.q || "").trim().toLowerCase();
   const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(Number(req.query.pageSize) || 25)));
+  const online = gmOnlineUuids();
   const matches = [...players.values()]
     .filter((player) => !query || [player.uuid, player.email, player.name].some((value) => String(value || "").toLowerCase().includes(query)))
     .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
-  return ok(res, { items: matches.slice((page - 1) * pageSize, page * pageSize).map(safePlayerSummary), total: matches.length, page, pageSize });
+  return ok(res, {
+    items: matches.slice((page - 1) * pageSize, page * pageSize).map((player) => ({ ...safePlayerSummary(player), online: online.has(player.uuid) })),
+    total: matches.length,
+    page,
+    pageSize
+  });
 });
 app.get("/api/gm/players/:uuid", requireGM, (req, res) => {
   const player = players.get(req.params.uuid);
   if (!player) return res.status(404).json({ code: 404, message: "玩家不存在" });
   return ok(res, {
     ...safePlayerSummary(player),
+    online: gmOnlineUuids().has(player.uuid),
     avatar: player.avatar,
     title: player.title,
     option: player.option || {},
@@ -1142,6 +1155,8 @@ app.get("/api/gm/players/:uuid", requireGM, (req, res) => {
     status: getPlayerStatus(player),
     taskQueue: player.taskQueue,
     kitty: player.kitty,
+    workEquipment: player.workEquipment || {},
+    battleEquipment: player.battleEquipment || {},
     marketProfile: player.marketProfile,
     battleRoom: publicBattleRoom(getBattleRoom(player.currentBattleRoomId))
   });
@@ -1163,7 +1178,9 @@ app.patch("/api/gm/players/:uuid", requireGM, (req, res) => {
       const count = Number(rawCount);
       if (!resourceCatalog[resourceId] && !["gold", "food"].includes(resourceId)) return res.status(400).json({ code: 400, message: `未知资源：${resourceId}` });
       if (!Number.isSafeInteger(count) || count < 0) return res.status(400).json({ code: 400, message: `${resourceId} 数量必须是非负整数` });
-      player.resources[resourceId] = count;
+      // 前端读的是 inventory.gold.count，只改 resources.gold 会出现「后台显示改了、游戏里没变」
+      if (resourceId === "gold") setGoldCount(player, count);
+      else player.resources[resourceId] = count;
     }
   }
   if (body.inventory !== undefined) {
@@ -1184,6 +1201,27 @@ app.patch("/api/gm/players/:uuid", requireGM, (req, res) => {
       if (!Number.isSafeInteger(exp) || exp < 0) return res.status(400).json({ code: 400, message: `${statusId} 经验必须是非负整数` });
       player.status[statusId] = normalizeStatus({ ...player.status[statusId], currentExp: exp, exp });
     }
+  }
+  // 装备栏整体覆盖：传 { head: "hatX", decorate1: null } 这种槽位→物品 id 的对象。
+  // 被换下来的旧装备退回背包，避免 GM 改配置时把物品改没（等价于手工卸下再穿上）。
+  for (const [key, rawEquipment] of [["workEquipment", body.workEquipment], ["battleEquipment", body.battleEquipment]]) {
+    if (rawEquipment === undefined) continue;
+    if (!rawEquipment || typeof rawEquipment !== "object" || Array.isArray(rawEquipment)) {
+      return res.status(400).json({ code: 400, message: `${key} 格式无效` });
+    }
+    const nextEquipment = {};
+    for (const [slot, rawValue] of Object.entries(rawEquipment)) {
+      if (!EQUIPMENT_SLOT_IDS.includes(slot)) return res.status(400).json({ code: 400, message: `未知装备槽：${slot}` });
+      if (rawValue === null || rawValue === "" || rawValue === undefined) continue;
+      const resourceId = String(rawValue);
+      if (resourceCatalog[resourceId]?.id !== resourceId) return res.status(400).json({ code: 400, message: `未知装备：${resourceId}` });
+      nextEquipment[slot] = resourceId;
+    }
+    const previous = player[key] && typeof player[key] === "object" && !Array.isArray(player[key]) ? player[key] : {};
+    for (const [slot, resourceId] of Object.entries(previous)) {
+      if (nextEquipment[slot] !== resourceId) addAsset(player, resourceId, 1);
+    }
+    player[key] = nextEquipment;
   }
   if (accounts.has(player.email)) saveAccounts();
   schedulePersist();
@@ -1215,8 +1253,111 @@ app.post("/api/gm/market/:tradeUuid/cancel", requireGM, (req, res) => {
   closeMarketTrade(trade);
   schedulePersist();
   if (owner) emitMarketPlayerState(owner.uuid);
+  gmLog("market-cancel", { tradeUuid: trade.tradeUuid, type: trade.type, owner: owner?.name || trade.ownerUuid });
   return ok(res, marketTradeView(trade, ""));
 });
+
+// ---- GM 物品发放 / 角色操作 ----
+// 物品清单直接来自前端资源表，前端只负责挑条目和数量，数量校验与入账都在这里做；
+// 发正数走 addAsset，发负数走 removeAsset，金币两边字段（inventory.gold / resources.gold）由 setGoldCount 同步。
+const GM_GRANT_MAX_COUNT = 1000000000;
+const GM_GRANT_MAX_ENTRIES = 50;
+const GM_LOG_LIMIT = 300;
+const gmLogs = [];
+
+function gmLog(action, detail) {
+  gmLogs.unshift({ at: new Date().toISOString(), action, detail });
+  if (gmLogs.length > GM_LOG_LIMIT) gmLogs.length = GM_LOG_LIMIT;
+}
+
+function gmGrantEntries(body) {
+  if (Array.isArray(body?.items)) return body.items;
+  if (body?.resourceId !== undefined || body?.id !== undefined) return [{ resourceId: body.resourceId ?? body.id, count: body.count }];
+  return [];
+}
+
+function gmKnownItem(resourceId) {
+  return resourceId === "gold" || resourceId === "food" || resourceCatalog[resourceId]?.id === resourceId;
+}
+
+app.get("/api/gm/catalog", requireGM, (_req, res) => {
+  return ok(res, {
+    items: Object.entries(resourceCatalog)
+      .filter(([id, item]) => item && item.id === id)
+      .map(([id, item]) => ({
+        id,
+        name: item.name || id,
+        icon: item.icon || "",
+        category: Array.isArray(item.category) ? item.category : [],
+        equipPart: item.equipPart || null,
+        equipmentType: Array.isArray(item.equipmentType) ? item.equipmentType : [],
+        isInternal: Boolean(item.isInternal)
+      }))
+    // 内部资源（饱食度、赞助积分这类）排到最后，GM 平时要发的是正常物品
+      .sort((left, right) => Number(left.isInternal) - Number(right.isInternal))
+    // 粮食是老存档里的 resources.food，不在资源表中，单独补一条方便发放
+    .concat([{ id: "food", name: "粮食", icon: "🍚", category: ["Currency"], equipPart: null, equipmentType: [], isInternal: false }]),
+    statusKeys
+  });
+});
+
+app.post("/api/gm/players/:uuid/grant", requireGM, (req, res) => {
+  const player = players.get(req.params.uuid);
+  if (!player) return res.status(404).json({ code: 404, message: "玩家不存在" });
+  const entries = gmGrantEntries(req.body);
+  if (!entries.length) return res.status(400).json({ code: 400, message: "请提供要发放的物品" });
+  if (entries.length > GM_GRANT_MAX_ENTRIES) return res.status(400).json({ code: 400, message: `单次最多 ${GM_GRANT_MAX_ENTRIES} 条` });
+
+  // 先整体校验再动手：避免第一条加成功、第三条才发现数量不足，留下一半的脏数据
+  const plan = [];
+  for (const entry of entries) {
+    const resourceId = String(entry?.resourceId ?? entry?.id ?? "");
+    const count = Math.trunc(Number(entry?.count));
+    if (!gmKnownItem(resourceId)) return res.status(400).json({ code: 400, message: `未知物品：${resourceId}` });
+    if (!Number.isFinite(count) || count === 0) return res.status(400).json({ code: 400, message: `${resourceId} 的数量必须是非零整数` });
+    if (Math.abs(count) > GM_GRANT_MAX_COUNT) return res.status(400).json({ code: 400, message: `${resourceId} 单次数量过大` });
+    plan.push({ resourceId, count });
+  }
+  const needs = new Map();
+  for (const { resourceId, count } of plan) {
+    if (count < 0) needs.set(resourceId, (needs.get(resourceId) || 0) - count);
+  }
+  for (const [resourceId, amount] of needs) {
+    const owned = getAssetCount(player, resourceId);
+    if (owned < amount) {
+      return res.status(400).json({ code: 400, message: `${resourceCatalog[resourceId]?.name || resourceId} 数量不足（需要 ${amount}，现有 ${Math.floor(owned)}）` });
+    }
+  }
+  for (const { resourceId, count } of plan) {
+    if (resourceId === "food") {
+      player.resources ||= {};
+      player.resources.food = Math.max(0, marketNumber(player.resources.food) + count);
+      continue;
+    }
+    if (count > 0) addAsset(player, resourceId, count);
+    else removeAsset(player, resourceId, -count);
+  }
+  schedulePersist();
+  emitMarketPlayerState(player.uuid);
+  gmLog("grant", { player: player.name, uuid: player.uuid, items: plan });
+  return ok(res, { applied: plan, inventory: player.inventory, resources: player.resources });
+});
+
+// 强制下线：只断 socket，不清存档（重登立刻回来）
+app.post("/api/gm/players/:uuid/kick", requireGM, (req, res) => {
+  const player = players.get(req.params.uuid);
+  if (!player) return res.status(404).json({ code: 404, message: "玩家不存在" });
+  const sockets = marketPlayerSockets(player.uuid);
+  for (const socket of sockets) {
+    emitGameEvent(socket, "character:logout", { message: "账号已在后台被强制下线" });
+    socket.disconnect(true);
+  }
+  gmLog("kick", { player: player.name, uuid: player.uuid, sockets: sockets.length });
+  return ok(res, { kicked: sockets.length });
+});
+
+app.get("/api/gm/logs", requireGM, (_req, res) => ok(res, { items: gmLogs.slice(0, 100) }));
+
 app.get("/api/app/version.check", (_req, res) => ok(res, { showUpdateLog: false, version: "local" }));
 
 // ---- 自定义头像 ----
@@ -3201,6 +3342,11 @@ io.on("connection", (socket) => {
 });
 
 app.get("/login", (_req, res) => res.sendFile(path.join(__dirname, "login.html")));
+// GM 后台是独立单页（不参与 Nuxt 构建），改动后台不用重新打包前端
+app.get("/gm", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "gm.html"));
+});
 app.use(express.static(frontendRoot, { index: "index.html", fallthrough: true }));
 app.get("*splat", (req, res, next) => {
   if (req.path.startsWith("/api/") || req.path.startsWith("/socket.io")) return next();
