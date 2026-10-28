@@ -114,6 +114,74 @@ const actionNames = (() => {
     return {};
   }
 })();
+// ---- 建造（building）----
+// 建造不是数据表里的普通动作：前端在 game-action 包里运行时合成
+//   j = { henhouse:{ id:"henhouse", name:"鸡舍", icon:"🐔", description:"…", buildDuration:6e5,
+//                    maxLevel:10, buildRequirement:{ resource:[{id:"wood",count:1900}, …] } }, … }
+//   S = Object.keys(j) → { "build_"+type: { id, name:"建造"+name, baseDuration:buildDuration,
+//                                          requirement:buildRequirement, rewards:[{buildingId:type}] } }
+// 后端不跟着合成的话，addTaskToQueue("build_xxx") 会被判 unknown action，
+// 即便跑完了也没有任何地方把建筑状态写成 BUILT。
+const buildingCatalog = (() => {
+  try {
+    const dir = path.join(frontendRoot, "_nuxt");
+    const actionFile = fs.readdirSync(dir).find((name) => name.startsWith("game-action-") && name.endsWith(".js"));
+    if (!actionFile) return {};
+    const source = fs.readFileSync(path.join(dir, actionFile), "utf8");
+    const marker = "const j={henhouse:";
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex < 0) return {};
+    const start = source.indexOf("{", markerIndex);
+    let depth = 0;
+    let quote = "";
+    let escaped = false;
+    let end = -1;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index];
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "\"" || character === "'" || character === "`") quote = character;
+      else if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) {
+        end = index + 1;
+        break;
+      }
+    }
+    if (end < 0) return {};
+    return Function(`"use strict"; return (${source.slice(start, end)})`)();
+  } catch {
+    return {};
+  }
+})();
+const buildingActions = (() => {
+  const actions = {};
+  for (const [type, building] of Object.entries(buildingCatalog)) {
+    if (!building || typeof building !== "object") continue;
+    const duration = Number(building.buildDuration);
+    const requirements = (building.buildRequirement?.resource || [])
+      .map((requirement) => ({ resourceId: String(requirement?.id || ""), count: Number(requirement?.count) }))
+      .filter((requirement) => requirement.resourceId && Number.isFinite(requirement.count) && requirement.count > 0);
+    actions[`build_${type}`] = {
+      id: `build_${type}`,
+      type,
+      name: `建造${building.name || type}`,
+      // 兜底 24s 与后面 DEFAULT_TASK_DURATION_MS 保持一致（那个常量定义在函数区，这里用不到）
+      baseDuration: Number.isFinite(duration) && duration > 0 ? duration : 24e3,
+      requirements
+    };
+  }
+  return actions;
+})();
+// 灌进动作表，让 taskActionExists / taskDurationFor / taskRequirementsFor /
+// actionDurationDetailFor / actionResourceRequirementDetailFor 全都自然生效
+for (const [actionId, action] of Object.entries(buildingActions)) {
+  actionDurationMs[actionId] = action.baseDuration;
+  actionRequirements[actionId] = action.requirements;
+}
 const battleAreaCatalog = (() => {
   try {
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", "game-battle-skill-I4Ckwbp2.js"), "utf8");
@@ -380,6 +448,8 @@ function makePlayer(email, name, existingUuid, createdAt) {
     status: {},
     workEquipment: {},
     battleEquipment: {},
+    // 自建建筑状态：{ [buildingId]: { status:"BUILT", level, builtAt } }，前端只认 status === "BUILT"
+    building: {},
     uniqueFlag: [],
     taskQueue: [],
     kitty: [],
@@ -416,6 +486,7 @@ function playerPersistenceView(player) {
     status: player.status,
     workEquipment: player.workEquipment,
     battleEquipment: player.battleEquipment,
+    building: player.building || {},
     uniqueFlag: player.uniqueFlag,
     taskQueue: player.taskQueue,
     kitty: player.kitty,
@@ -447,6 +518,7 @@ function loadPersistentState() {
           status: saved.status && typeof saved.status === "object" ? saved.status : player.status,
           workEquipment: saved.workEquipment && typeof saved.workEquipment === "object" ? saved.workEquipment : player.workEquipment,
           battleEquipment: saved.battleEquipment && typeof saved.battleEquipment === "object" ? saved.battleEquipment : player.battleEquipment,
+          building: saved.building && typeof saved.building === "object" && !Array.isArray(saved.building) ? saved.building : player.building,
           uniqueFlag: Array.isArray(saved.uniqueFlag) ? saved.uniqueFlag : player.uniqueFlag,
           taskQueue: Array.isArray(saved.taskQueue) ? saved.taskQueue : player.taskQueue,
           kitty: Array.isArray(saved.kitty) ? saved.kitty : player.kitty,
@@ -1551,7 +1623,8 @@ function characterInitData(player) {
     workEquipment: player.workEquipment || {},
     battleEquipment: player.battleEquipment || {},
     skills: { baseAttack: { level: 1, order: 0 } },
-    building: {},
+    // 前端只判断 building[type].status === "BUILT"（其他状态位是公共建筑 villageBuilding 用的另一套）
+    building: player.building || {},
     kittyFurniture: {},
     status: getPlayerStatus(player),
     guild: {},
@@ -2477,6 +2550,35 @@ function consumeTaskRequirements(player, actionId) {
   return null;
 }
 
+// ---- 建造（building）状态 ----
+// 前端 store 形状是 { [buildingId]: { status } }，只认 status === "BUILT"：
+//   My() = e("building", () => ({}))  →  v = "BUILT" == a[buildingId]?.status
+// （UNBUILD / BUILDING / NORMAL / PREPARE_UPGRADE 那套枚举属于公共建筑 villageBuilding，不是这里）
+function buildingState(player, type) {
+  const entry = player?.building?.[type];
+  return entry && typeof entry === "object" && !Array.isArray(entry) ? entry : null;
+}
+
+function isBuildingBuilt(player, type) {
+  return buildingState(player, type)?.status === "BUILT";
+}
+
+// 建造任务跑完一次 → 建筑落成。已经是 BUILT 的不会重复写，返回 false。
+function completeBuildingAction(player, actionId) {
+  const action = buildingActions[actionId];
+  if (!action) return false;
+  const current = buildingState(player, action.type);
+  if (current?.status === "BUILT") return false;
+  if (!player.building || typeof player.building !== "object" || Array.isArray(player.building)) player.building = {};
+  player.building[action.type] = {
+    type: action.type,
+    status: "BUILT",
+    level: Math.max(1, Number(current?.level) || 0),
+    builtAt: new Date().toISOString()
+  };
+  return true;
+}
+
 function taskActionExists(actionId) {
   return Boolean(actionId && (actionDurationMs[actionId] || actionRewards[actionId] || actionImprovements[actionId] || actionRequirements[actionId]));
 }
@@ -3273,8 +3375,19 @@ function runTaskQueue(socket) {
     schedulePersist();
   }
   if (task.paused) {
-    runner.timer = setTimeout(() => runTaskQueue(socket), 1000);
-    return;
+    // 「材料不足」的暂停要能自己醒过来：玩家补货后不必重启服务/重排任务。
+    // 这里每秒探一次，材料齐了就当场解除暂停继续跑；其它暂停原因（手动）保持不动。
+    if (task.pauseReason === "insufficient_resource" && !taskRequirementError(player, task.actionId)) {
+      task.paused = false;
+      task.pauseReason = null;
+      task.lastSubtaskDoneTime = Date.now();
+      emitGameEvent(socket, "taskUpdated", task);
+      dispatchTaskQueue(socket);
+      schedulePersist();
+    } else {
+      runner.timer = setTimeout(() => runTaskQueue(socket), 1000);
+      return;
+    }
   }
   const now = Date.now();
   if (!task.lastSubtaskDoneTime || task.lastSubtaskDoneTime > now) task.lastSubtaskDoneTime = now;
@@ -3319,6 +3432,11 @@ function runTaskQueue(socket) {
   }
   if (applyActionImprovements(player, task.actionId)) {
     emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(player).status);
+  }
+  // 建造任务完成：写成 BUILT。前端只在 characterInitData 里合并 building，
+  // 而它定义的 dispatchCharacterBuildingInfo 事件并没有监听者，所以只能重发整包初始数据。
+  if (completeBuildingAction(player, task.actionId)) {
+    emitGameEvent(socket, "characterInitData", { data: characterInitData(player) });
   }
   for (const quest of advanceQuests(player, task.actionId)) emitGameEvent(socket, "quest:updated", quest);
   schedulePersist();
@@ -3497,6 +3615,19 @@ io.on("connection", (socket) => {
       if (!taskActionExists(data.actionId)) {
         emitGameEvent(socket, failureEvent, { message: "unknown action" });
         return;
+      }
+      // 建造动作：已建成的不能再排；一次只建一栋（前端固定发 repeatCount:1，这里兜一层）
+      const buildingAction = buildingActions[data.actionId];
+      if (buildingAction) {
+        if (isBuildingBuilt(socket.player, buildingAction.type)) {
+          emitGameEvent(socket, failureEvent, { message: "该建筑已建造" });
+          return;
+        }
+        if (socket.player.taskQueue.some((queued) => queued?.actionId === data.actionId)) {
+          emitGameEvent(socket, failureEvent, { message: "该建筑已在队列中" });
+          return;
+        }
+        data.repeatCount = 1;
       }
       const task = makeTask(data, socket.player);
       if (event === "task:immediatelyStart") socket.player.taskQueue.unshift(task);
