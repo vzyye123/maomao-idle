@@ -460,6 +460,13 @@ function makePlayer(email, name, existingUuid, createdAt) {
     questSeq: 0,
     questWindow: 0,
     farmPlots: [],
+    // 技能配置（技能页 characterBattleSkill）：数组形态，见 playerSkills 的注释。
+    // baseAttack 是出生自带的普通攻击，恒存在且不可禁用。
+    skillList: [{ skillId: "baseAttack", level: 1, exp: 0, enabled: true, order: 0, logic: [] }],
+    // 技能配置方案：{ uuid, name, data:[技能…], createdAt, updatedAt }
+    skillOutfits: [],
+    // 战斗物品袋：{ [resourceId]: { remainingCount, prepareCount, ai, order, useWhen } }
+    battleInventory: {},
     createdAt: createdAt || new Date().toISOString()
   };
   setGoldCount(player, 1000);
@@ -495,6 +502,10 @@ function playerPersistenceView(player) {
     questSeq: Number(player.questSeq) || 0,
     questWindow: Number(player.questWindow) || 0,
     farmPlots: Array.isArray(player.farmPlots) ? player.farmPlots : [],
+    // 技能配置（数组）。老存档里没有这两个字段，读档时由 playerSkills 兜底成只有 baseAttack
+    skillList: Array.isArray(player.skillList) ? player.skillList : [],
+    skillOutfits: Array.isArray(player.skillOutfits) ? player.skillOutfits : [],
+    battleInventory: player.battleInventory && typeof player.battleInventory === "object" && !Array.isArray(player.battleInventory) ? player.battleInventory : {},
     createdAt: player.createdAt
   };
 }
@@ -526,7 +537,10 @@ function loadPersistentState() {
           quests: Array.isArray(saved.quests) ? saved.quests : player.quests,
           questSeq: Number.isFinite(Number(saved.questSeq)) ? Number(saved.questSeq) : player.questSeq,
           questWindow: Number.isFinite(Number(saved.questWindow)) ? Number(saved.questWindow) : player.questWindow,
-          farmPlots: Array.isArray(saved.farmPlots) ? saved.farmPlots : player.farmPlots
+          farmPlots: Array.isArray(saved.farmPlots) ? saved.farmPlots : player.farmPlots,
+          skillList: Array.isArray(saved.skillList) && saved.skillList.length ? saved.skillList : player.skillList,
+          skillOutfits: Array.isArray(saved.skillOutfits) ? saved.skillOutfits : player.skillOutfits,
+          battleInventory: saved.battleInventory && typeof saved.battleInventory === "object" && !Array.isArray(saved.battleInventory) ? saved.battleInventory : player.battleInventory
         });
         if (player.inventory?.gold?.count === undefined) setGoldCount(player, player.resources?.gold || 0);
         // 老存档可能残留「资源不足自动暂停」的任务：饱食度这条已改成直接结束，
@@ -1588,7 +1602,7 @@ function eventResult(event, player, payload) {
   }
   if (event === "character:getGameState") return { resources: player.resources, inventory: player.inventory, taskQueue: player.taskQueue };
   if (event === "character:getEquipment") return data.type === "battle" ? player.battleEquipment : player.workEquipment;
-  if (event === "character:getSkills") return player.skills || { baseAttack: { level: 1, order: 0 } };
+  if (event === "character:getSkills") return playerSkills(player);
   if (event === "getTaskQueue") return player.taskQueue;
   if (event === "kitty:getAll" || event === "kitty:getAllFriend") return player.kitty;
   if (event === "kitty:getAllTask") return [];
@@ -1638,6 +1652,436 @@ function statusDetailFor(player) {
   return detail;
 }
 
+// ---- 战斗技能配置（技能页）----
+// 前端 store 是 characterBattleSkill，唯一的写入点是 character:getSkills:success
+// （index-CnYosZ2K.js 约 475854 的 `XC(e => { _.value = e })`），且 sf() 的默认值是 []。
+// 多处消费点直接 `(s.value || []).filter(...)` / `.find(e => e.skillId === t && e.enabled)`
+// （知识王冠 860806、支配之印 878085、猫眼法杖 884666、影缠腰带 894389 等）
+// → 下发必须是「数组」，元素 { skillId, level, exp, enabled, order, logic }。
+// baseAttack 恒存在且不可禁用：前端 Base 卡片对 baseAttack 不渲染经验条、也不渲染启用/禁用按钮。
+const SKILL_BASE_ID = "baseAttack";
+// 技能书 → 技能 id（来自 game-json-resources 的 12 个 *SkillBook 条目，资源表里没有 onUse，
+// 真实站点应是用 learnBattleSkillEffect 学技能，这份数据被裁掉了，所以由后端补上语义）
+const SKILL_BOOK_TO_SKILL = {
+  groupShieldSkillBook: "groupShield",
+  threadingNeedleSkillBook: "threadingNeedle",
+  natureGiftSkillBook: "natureGift",
+  knowledgeInspirationSkillBook: "knowledgeInspiration",
+  sowMelonsReapMelonsSkillBook: "sowMelonsReapMelons",
+  enhanceEmpowerSkillBook: "enhanceEmpower",
+  enhanceStrikeSkillBook: "enhanceStrike",
+  fishmanSkillSkillBook: "fishmanSkill",
+  forgeSkillCraftTurretSkillBook: "forgeSkillCraftTurret",
+  forgeSkillCraftMeowColossusSkillBook: "forgeSkillCraftMeowColossus",
+  chefSkillSkillBook: "chefSkill",
+  beastpackRoarSkillBook: "beastpackRoar"
+};
+
+// logic 是「条件组数组」：组间 OR、组内 AND，前端 LogicEditor 单组时会摊平成 [...conds]、
+// 多组时是 [[...conds], ...]。后端不理解语义，只做深拷贝 + 尺寸上限，避免被塞爆存档。
+const SKILL_LOGIC_MAX_BYTES = 20000;
+
+function sanitizeSkillLogic(raw) {
+  if (!Array.isArray(raw)) return [];
+  try {
+    const text = JSON.stringify(raw);
+    if (text.length > SKILL_LOGIC_MAX_BYTES) return null;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// 归一化：兼容老存档的 player.skills = { baseAttack: { level, order } } 对象形态。
+// 返回值总是一个新数组，顺序即 order（baseAttack 排第 0 位，其余按原 order 升序重编号）。
+function playerSkills(player) {
+  const source = Array.isArray(player.skillList)
+    ? player.skillList
+    : player.skills && typeof player.skills === "object" && !Array.isArray(player.skills)
+      ? Object.entries(player.skills).map(([skillId, entry]) => ({ skillId, ...(entry || {}) }))
+      : [];
+  const seen = new Set();
+  const entries = [];
+  for (const entry of source) {
+    const skillId = typeof entry?.skillId === "string" ? entry.skillId.trim() : "";
+    if (!skillId || seen.has(skillId)) continue;
+    seen.add(skillId);
+    entries.push({
+      skillId,
+      level: Math.max(1, Math.floor(Number(entry.level) || 1)),
+      exp: Math.max(0, Number(entry.exp) || 0),
+      // 缺 enabled 时按启用处理：老存档里已学会的技能不该突然变成「已禁用」
+      enabled: entry.enabled !== false,
+      order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : entries.length,
+      logic: sanitizeSkillLogic(entry.logic) || []
+    });
+  }
+  const base = entries.find((entry) => entry.skillId === SKILL_BASE_ID);
+  if (!base) {
+    // order -1 让它排在所有已有技能之前
+    entries.push({ skillId: SKILL_BASE_ID, level: 1, exp: 0, enabled: true, order: -1, logic: [] });
+  } else {
+    base.enabled = true;
+    base.level = Math.max(1, base.level);
+  }
+  // order 只用于前端排序和拖拽（前端拖拽列表里是「已启用」的全部技能，含 baseAttack，
+  // 玩家把它拖到后面也允许），所以只按 order 升序重编号成 0..n-1，不钉死 baseAttack 的位置
+  return entries
+    .sort((left, right) => left.order - right.order)
+    .map((entry, index) => ({ ...entry, order: index }));
+}
+
+// 写回：playerSkills 是纯函数（getSkills / characterInitData 会频繁调），落库走这里
+function normalizePlayerSkills(player) {
+  const list = playerSkills(player);
+  player.skillList = list;
+  if (player.skills !== undefined) delete player.skills;
+  return list;
+}
+
+function findPlayerSkill(player, skillId) {
+  if (!skillId) return null;
+  return normalizePlayerSkills(player).find((entry) => entry.skillId === skillId) || null;
+}
+
+function skillOutfitsFor(player) {
+  if (!Array.isArray(player.skillOutfits)) player.skillOutfits = [];
+  return player.skillOutfits;
+}
+
+// 技能页上的「方案」卡片：{ uuid, name, data: [技能…] }，data 用和 getSkills 一样的形状，
+// 前端 DK 组件只读 skillId / enabled / logic（index-CnYosZ2K.js 约 1090000）
+function publicSkillOutfit(outfit) {
+  return {
+    uuid: outfit.uuid,
+    name: outfit.name,
+    data: (outfit.data || []).map((entry) => ({
+      skillId: entry.skillId,
+      level: entry.level,
+      exp: entry.exp,
+      enabled: !!entry.enabled,
+      order: entry.order,
+      logic: entry.logic || []
+    })),
+    createdAt: outfit.createdAt
+  };
+}
+
+// 技能页的写操作。注意前端对这些事件只有 :success 的 toast 监听（QC/JC 只弹提示，
+// 不写 store），唯一的状态更新通道是 character:getSkills:success 整包替换 → 每次写完都要重推。
+// 返回 true 表示已处理（调用方不要再走 eventResult 兜底）。
+function handleSkillConfigEvent(socket, event, data) {
+  const player = socket.player;
+  if (!player) return false;
+  const pushSkills = () => emitGameEvent(socket, "character:getSkills:success", normalizePlayerSkills(player));
+  const pushOutfits = () => emitGameEvent(socket, "skillOutfit:list:success", { outfits: skillOutfitsFor(player).map(publicSkillOutfit) });
+  const succeed = (payload) => {
+    schedulePersist();
+    pushSkills();
+    emitGameEvent(socket, `${event}:success`, payload);
+  };
+  const fail = (message) => emitGameEvent(socket, `${event}:fail`, { message });
+
+  if (event === "character:enableSkill" || event === "character:disableSkill") {
+    const skillId = String(data?.skillId || "");
+    const skill = findPlayerSkill(player, skillId);
+    if (!skill) {
+      fail("你还没有学会该技能");
+      return true;
+    }
+    if (skillId === SKILL_BASE_ID) {
+      fail("普通攻击不能禁用");
+      return true;
+    }
+    skill.enabled = event === "character:enableSkill";
+    succeed({ skillId, enabled: skill.enabled });
+    return true;
+  }
+
+  if (event === "character:reorderSkill") {
+    const order = Array.isArray(data?.skillOrder) ? data.skillOrder.map((item) => String(item)) : [];
+    if (!order.length) {
+      fail("技能顺序不能为空");
+      return true;
+    }
+    const list = normalizePlayerSkills(player);
+    const byId = new Map(list.map((entry) => [entry.skillId, entry]));
+    const ranked = [];
+    for (const skillId of order) {
+      const skill = byId.get(skillId);
+      if (skill && !ranked.includes(skill)) ranked.push(skill);
+    }
+    // 前端拖拽只提交「已启用」的技能，未启用的接在后面并保持原有相对顺序
+    const merged = [...ranked, ...list.filter((entry) => !ranked.includes(entry))];
+    player.skillList = merged.map((entry, index) => ({ ...entry, order: index }));
+    succeed({ skillOrder: player.skillList.map((entry) => entry.skillId) });
+    return true;
+  }
+
+  if (event === "character:updateSkillCastLogic") {
+    const skillId = String(data?.skillId || "");
+    const skill = findPlayerSkill(player, skillId);
+    if (!skill) {
+      fail("你还没有学会该技能");
+      return true;
+    }
+    const logic = sanitizeSkillLogic(data?.logic);
+    // 非数组要直接拒：sanitizeSkillLogic 对非数组返回 [] 是给老数据兜底用的，
+    // 用在写路径上会把「传错类型」当成「清空逻辑」悄悄存下去
+    if (!Array.isArray(data?.logic) || !logic) {
+      fail("自动释放逻辑不合法或数据过大");
+      return true;
+    }
+    skill.logic = logic;
+    succeed({ skillId, logic });
+    return true;
+  }
+
+  if (event === "character:copySkillLogic") {
+    const replyCopyFail = (payload) => {
+      emitGameEvent(socket, "character:copySkillLogic:fail", payload);
+      return true;
+    };
+    const targetKey = String(data?.playerUuid || "").trim();
+    const target = players.get(targetKey) || [...players.values()].find((item) => item.name === targetKey);
+    if (!target) return replyCopyFail({ message: "找不到该玩家" });
+    if (target.uuid === player.uuid) return replyCopyFail({ message: "不能复制自己的技能配置" });
+    // 只复制「配置」（启用状态 / 顺序 / 自动释放逻辑）；等级和经验是各自的进度，不覆盖
+    const source = playerSkills(target).filter((entry) => entry.skillId !== SKILL_BASE_ID);
+    const own = new Map(normalizePlayerSkills(player).map((entry) => [entry.skillId, entry]));
+    // 缺技能就整体不复制：前端拿到 missingSkills 会弹「缺失技能」列表，部分应用反而更难解释
+    const missingSkills = source.filter((entry) => !own.has(entry.skillId)).map((entry) => entry.skillId);
+    if (missingSkills.length) return replyCopyFail({ message: "以下技能你还没有学会", missingSkills });
+    for (const entry of source) {
+      const skill = own.get(entry.skillId);
+      skill.enabled = entry.enabled;
+      skill.order = entry.order;
+      skill.logic = structuredClone(entry.logic || []);
+    }
+    player.skillList = [...own.values()].map((entry, index) => ({ ...entry, order: index }));
+    schedulePersist();
+    pushSkills();
+    emitGameEvent(socket, "character:copySkillLogic:success", {});
+    return true;
+  }
+
+  if (event === "skillOutfit:list") {
+    pushOutfits();
+    return true;
+  }
+
+  if (event === "skillOutfit:saveCurrent") {
+    const name = typeof data?.name === "string" ? data.name.trim() : "";
+    const failSave = (message) => {
+      emitGameEvent(socket, "skillOutfit:saveCurrent:fail", { message });
+      return true;
+    };
+    if (!name || name.length > 12) return failSave("方案名称需为 1~12 个字符");
+    const outfits = skillOutfitsFor(player);
+    const snapshot = normalizePlayerSkills(player).map((entry) => ({ ...entry, logic: structuredClone(entry.logic || []) }));
+    const now = new Date().toISOString();
+    let outfit = outfits.find((item) => item.name === name);
+    if (outfit) {
+      // 同名直接覆盖：前端只给了名字，没有「重命名」入口，同名当更新更符合直觉
+      outfit.data = snapshot;
+      outfit.updatedAt = now;
+    } else {
+      if (outfits.length >= 20) return failSave("技能配置方案最多 20 个");
+      outfit = { uuid: crypto.randomUUID(), name, data: snapshot, createdAt: now, updatedAt: now };
+      outfits.push(outfit);
+    }
+    schedulePersist();
+    emitGameEvent(socket, "skillOutfit:saveCurrent:success", { outfit: publicSkillOutfit(outfit) });
+    // 方案列表组件只在挂载时拉一次（skillOutfit:list），保存后不推一份的话新方案不会出现
+    pushOutfits();
+    return true;
+  }
+
+  if (event === "skillOutfit:apply") {
+    const outfit = skillOutfitsFor(player).find((item) => item.uuid === String(data?.outfitUuid || ""));
+    if (!outfit) {
+      emitGameEvent(socket, "skillOutfit:apply:fail", { message: "找不到该技能配置" });
+      return true;
+    }
+    const own = new Map(normalizePlayerSkills(player).map((entry) => [entry.skillId, entry]));
+    const base = own.get(SKILL_BASE_ID);
+    const applied = [];
+    const seen = new Set();
+    for (const entry of outfit.data || []) {
+      const skill = own.get(entry.skillId);
+      if (!skill || seen.has(entry.skillId)) continue;
+      seen.add(entry.skillId);
+      applied.push({ ...skill, enabled: entry.enabled !== false, logic: structuredClone(entry.logic || []) });
+    }
+    // baseAttack 的位置跟玩家拖拽的结果走（reorderSkill 允许把它拖到中间），
+    // 只有方案里确实没有它时才补到最前；方案里没有的技能接在后面保持原状
+    if (!seen.has(SKILL_BASE_ID)) applied.unshift(base);
+    const tail = [...own.values()].filter((entry) => !seen.has(entry.skillId) && entry.skillId !== SKILL_BASE_ID);
+    player.skillList = [...applied, ...tail].map((entry, index) => ({ ...entry, order: index }));
+    schedulePersist();
+    pushSkills();
+    emitGameEvent(socket, "skillOutfit:apply:success", { outfit: publicSkillOutfit(outfit) });
+    return true;
+  }
+
+  if (event === "skillOutfit:delete") {
+    const outfits = skillOutfitsFor(player);
+    const index = outfits.findIndex((item) => item.uuid === String(data?.outfitUuid || ""));
+    if (index < 0) {
+      emitGameEvent(socket, "skillOutfit:delete:fail", { message: "找不到该技能配置" });
+      return true;
+    }
+    outfits.splice(index, 1);
+    schedulePersist();
+    // 前端删完把 e.outfit 当成整个列表直接赋值（t.value = e.outfit），所以这里发的是剩余全部
+    emitGameEvent(socket, "skillOutfit:delete:success", { outfit: outfits.map(publicSkillOutfit) });
+    return true;
+  }
+
+  return false;
+}
+
+// ---- 战斗物品袋（「技能&物品袋」页下半部分「战斗物品配置」）----
+// 前端 store 是组件内的本地 ref，所有写操作的 :success 都整包替换成「对象 map」：
+//   { [resourceId]: { remainingCount, prepareCount, ai, order, useWhen } }
+// 形状不对会被 Object.entries 当成条目渲染出来（没实现时页面显示成 accepted / event / data 三行）。
+// 语义：prepareCount 是计划携带量，remainingCount 是袋里还剩几个；取回时按 remainingCount 退回背包。
+function battleInventoryView(player) {
+  const source = player.battleInventory;
+  const result = {};
+  if (!source || typeof source !== "object" || Array.isArray(source)) return result;
+  let index = 0;
+  for (const [resourceId, entry] of Object.entries(source)) {
+    if (!resourceCatalog[resourceId] || !entry) continue;
+    result[resourceId] = {
+      remainingCount: Math.max(0, Math.floor(Number(entry.remainingCount) || 0)),
+      prepareCount: Math.max(0, Math.floor(Number(entry.prepareCount) || 0)),
+      ai: Array.isArray(entry.ai) ? entry.ai : [],
+      order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : index,
+      useWhen: Array.isArray(entry.useWhen) ? entry.useWhen.filter((item) => typeof item === "string").slice(0, 10) : []
+    };
+    index += 1;
+  }
+  return result;
+}
+
+function battleInventoryStore(player) {
+  if (!player.battleInventory || typeof player.battleInventory !== "object" || Array.isArray(player.battleInventory)) player.battleInventory = {};
+  return player.battleInventory;
+}
+
+function handleBattleInventoryEvent(socket, event, data) {
+  const player = socket.player;
+  if (!player) return false;
+  const pushBag = () => emitGameEvent(socket, "character:getBattleInventory:success", battleInventoryView(player));
+  const pushInventory = () => {
+    emitGameEvent(socket, "dispatchInventoryInfo", player.inventory);
+    emitGameEvent(socket, "inventoryUpdated", player.inventory);
+  };
+  // 前端失败事件名不统一：add / remove / refill 用 :fail，reorder 用 :error
+  const failWith = (suffix, message) => {
+    emitGameEvent(socket, `${event}:${suffix}`, { message });
+    return true;
+  };
+
+  if (event === "character:getBattleInventory") {
+    pushBag();
+    return true;
+  }
+
+  if (event === "character:addResourceToBattleInventory") {
+    const resourceId = String(data?.resourceId || "");
+    const count = Math.max(1, Math.floor(Number(data?.count) || 1));
+    // 前端下拉只列 inBattleEffect 的物品，后端照样校验，避免塞进不能用的东西
+    if (!resourceCatalog[resourceId]?.inBattleEffect) return failWith("fail", "该物品不能放进战斗物品袋");
+    if (getAssetCount(player, resourceId) < count) return failWith("fail", "背包中数量不足");
+    removeAsset(player, resourceId, count);
+    const bag = battleInventoryStore(player);
+    const current = bag[resourceId] || {};
+    bag[resourceId] = {
+      remainingCount: (Number(current.remainingCount) || 0) + count,
+      prepareCount: (Number(current.prepareCount) || 0) + count,
+      ai: Array.isArray(current.ai) ? current.ai : [],
+      order: Number.isFinite(Number(current.order)) ? Number(current.order) : Object.keys(bag).length,
+      useWhen: Array.isArray(current.useWhen) ? current.useWhen : []
+    };
+    schedulePersist();
+    pushInventory();
+    emitGameEvent(socket, "character:addResourceToBattleInventory:success", battleInventoryView(player));
+    return true;
+  }
+
+  if (event === "character:removeResourceFromBattleInventory") {
+    const resourceId = String(data?.resourceId || "");
+    const bag = battleInventoryStore(player);
+    const entry = bag[resourceId];
+    if (!entry) return failWith("fail", "战斗物品袋里没有该物品");
+    // prepareCount 只是计划量，不产生实物；只把袋里实际剩下的退回去
+    const back = Math.max(0, Math.floor(Number(entry.remainingCount) || 0));
+    if (back > 0) addAsset(player, resourceId, back);
+    delete bag[resourceId];
+    schedulePersist();
+    pushInventory();
+    pushBag();
+    emitGameEvent(socket, "character:removeResourceFromBattleInventory:success", battleInventoryView(player));
+    return true;
+  }
+
+  if (event === "character:refillBattleInventory") {
+    const resourceId = String(data?.resourceId || "");
+    const bag = battleInventoryStore(player);
+    const entry = bag[resourceId];
+    if (!entry) return failWith("fail", "战斗物品袋里没有该物品");
+    const remaining = Math.max(0, Math.floor(Number(entry.remainingCount) || 0));
+    const missing = Math.max(0, Math.floor(Number(entry.prepareCount) || 0) - remaining);
+    if (missing <= 0) return failWith("fail", "已经补满了");
+    const count = Math.min(missing, Math.max(1, Math.floor(Number(data?.count) || missing)));
+    if (getAssetCount(player, resourceId) < count) return failWith("fail", "背包中数量不足");
+    removeAsset(player, resourceId, count);
+    entry.remainingCount = remaining + count;
+    schedulePersist();
+    pushInventory();
+    emitGameEvent(socket, "character:refillBattleInventory:success", battleInventoryView(player));
+    return true;
+  }
+
+  if (event === "character:reorderBattleInventory") {
+    const order = Array.isArray(data?.order) ? data.order.map((item) => String(item)) : [];
+    if (!order.length) return failWith("error", "排序不能为空");
+    const bag = battleInventoryStore(player);
+    const ranked = [];
+    for (const resourceId of order) {
+      if (bag[resourceId] && !ranked.includes(resourceId)) ranked.push(resourceId);
+    }
+    // 前端拖拽提交的是完整列表，没提到的物品接在后面保持原顺序
+    const tail = Object.keys(bag).filter((resourceId) => !ranked.includes(resourceId));
+    [...ranked, ...tail].forEach((resourceId, index) => {
+      bag[resourceId].order = index;
+    });
+    schedulePersist();
+    emitGameEvent(socket, "character:reorderBattleInventory:success", battleInventoryView(player));
+    return true;
+  }
+
+  if (event === "character:updateBattleUseItemLogic") {
+    const resourceId = String(data?.resourceId || "");
+    const bag = battleInventoryStore(player);
+    const entry = bag[resourceId];
+    if (!entry) return failWith("fail", "战斗物品袋里没有该物品");
+    // payload 里叫 logic，存下来给前端读的字段是 ai（见 949400 附近的 f computed）
+    if (!Array.isArray(data?.logic)) return failWith("fail", "自动使用逻辑不合法");
+    const logic = sanitizeSkillLogic(data.logic);
+    if (!logic) return failWith("fail", "自动使用逻辑不合法或数据过大");
+    entry.ai = logic;
+    entry.useWhen = Array.isArray(data?.useWhen) ? data.useWhen.filter((item) => typeof item === "string").slice(0, 10) : [];
+    schedulePersist();
+    emitGameEvent(socket, "character:updateBattleUseItemLogic:success", battleInventoryView(player));
+    return true;
+  }
+
+  return false;
+}
+
 function characterInitData(player) {
   const currentBattleRoom = getBattleRoom(player.currentBattleRoomId);
   return {
@@ -1651,7 +2095,8 @@ function characterInitData(player) {
     allGameActionResourceRequirementDetail: actionResourceRequirementDetailFor(player),
     workEquipment: player.workEquipment || {},
     battleEquipment: player.battleEquipment || {},
-    skills: { baseAttack: { level: 1, order: 0 } },
+    // 技能页的 characterBattleSkill 是数组（见 playerSkills 的注释），初始化时整包下发
+    skills: playerSkills(player),
     // 前端只判断 building[type].status === "BUILT"（其他状态位是公共建筑 villageBuilding 用的另一套）
     building: player.building || {},
     kittyFurniture: {},
@@ -1890,6 +2335,9 @@ function makeBattleUnit(player) {
     status: battleStatus,
     baseStatus: structuredClone(battleStatus),
     state: {},
+    // 战斗单位的 skills 是「对象」形态（resolveBattleTurn 只认 baseAttack），和技能页那份
+    // 数组（characterBattleSkill）不是一回事。技能页启用的技能暂不参与战斗：119 个技能的
+    // 效果引擎还没实现，塞进来前端会渲染出点了没反应的技能按钮。
     skills: { baseAttack: { level: 1, order: 0 } },
     skillOrder: ["baseAttack"],
     ai: {},
@@ -2773,6 +3221,19 @@ function useItem(player, itemId, multiple) {
   const count = Math.max(1, Math.floor(Number(multiple) || 1));
   const item = player.inventory[itemId];
   if (!item || (Number(item.count) || 0) < count) return { error: "物品数量不足" };
+  // 技能书：资源表里的 12 个 *SkillBook 只有 id/name/userBuyCost，没有 onUse，
+  // 真实站点的 learnBattleSkillEffect 在这份数据里被裁掉了，所以由后端补语义。
+  // 一次只能学一本（学会了再用就没意义了）。
+  const learnedSkillId = SKILL_BOOK_TO_SKILL[itemId];
+  if (learnedSkillId) {
+    const list = normalizePlayerSkills(player);
+    if (list.some((entry) => entry.skillId === learnedSkillId)) return { error: "你已经学会该技能了" };
+    list.push({ skillId: learnedSkillId, level: 1, exp: 0, enabled: true, order: list.length, logic: [] });
+    player.skillList = list;
+    item.count -= 1;
+    if (item.count <= 0) delete player.inventory[itemId];
+    return { learnedSkill: learnedSkillId, consumed: 1 };
+  }
   const gained = {};
   for (let index = 0; index < count; index += 1) {
     for (const effect of itemUseEffects[itemId] || []) {
@@ -3681,8 +4142,15 @@ io.on("connection", (socket) => {
       }
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
-      if (Object.keys(result.gained).length) emitGameEvent(socket, "inventory:increase:success", result.gained);
-      emitGameEvent(socket, "effectAction:useItem:success", { itemId: data.itemId, multiple: Math.max(1, Math.floor(Number(data.multiple) || 1)), gained: result.gained });
+      // 技能书走的是另一条返回（没有 gained），这里统一兜底
+      const gained = result.gained || {};
+      if (Object.keys(gained).length) emitGameEvent(socket, "inventory:increase:success", gained);
+      if (result.learnedSkill) {
+        // 学会新技能要让技能页立刻出现这张卡：store 只认 character:getSkills:success
+        emitGameEvent(socket, "character:getSkills:success", normalizePlayerSkills(socket.player));
+      }
+      emitGameEvent(socket, "effectAction:useItem:success", { itemId: data.itemId, multiple: Math.max(1, Math.floor(Number(data.multiple) || 1)), gained, learnedSkill: result.learnedSkill });
+      schedulePersist();
       return;
     }
     if (event === "effectAction:equipItem") {
@@ -3756,6 +4224,28 @@ io.on("connection", (socket) => {
       // 里 U.value = e，整包替换 characterStatusInfo）。
       emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(socket.player).status);
       return;
+    }
+    // 技能页的写操作：都存在 player.skillList / player.skillOutfits 上，写完重推整包技能列表
+    if (
+      event.startsWith("skillOutfit:") ||
+      event === "character:enableSkill" ||
+      event === "character:disableSkill" ||
+      event === "character:reorderSkill" ||
+      event === "character:updateSkillCastLogic" ||
+      event === "character:copySkillLogic"
+    ) {
+      if (handleSkillConfigEvent(socket, event, data)) return;
+    }
+    // 战斗物品袋（技能&物品袋 → 战斗物品配置）
+    if (
+      event === "character:getBattleInventory" ||
+      event === "character:addResourceToBattleInventory" ||
+      event === "character:removeResourceFromBattleInventory" ||
+      event === "character:refillBattleInventory" ||
+      event === "character:reorderBattleInventory" ||
+      event === "character:updateBattleUseItemLogic"
+    ) {
+      if (handleBattleInventoryEvent(socket, event, data)) return;
     }
     if (event.startsWith("farm:") && handleFarmEvent(socket, event, data)) return;
     if (event.startsWith("quest:") && handleQuestEvent(socket, event, data)) return;
