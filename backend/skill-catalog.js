@@ -1,7 +1,8 @@
-// 自动生成，勿手改：python .tmp/gen-skill-catalog.py
+// 自动生成，勿手改：python backend/tools/gen-skill-catalog.py
 // 数据来源：pulled-frontend/_nuxt/game-battle-skill-I4Ckwbp2.js 的技能表 yl
-// value 是从 effect 源码里提取的数值算式（变量已换成属性名），执行用 new Function。
-// value 为 null 表示该技能的有效果依赖控制流/上下文，后端不自动施放。
+// value：直接伤害/治疗/护盾的算式（变量已换成属性名），后端用 new Function 求值。
+// stateValues：技能挂的状态及强度算式（参考站的 thisStateActuralValue）。
+// neverCast：参考站里 preCheck 恒假、放了也没效果的技能。
 export default {
  "expTable": [
   0,
@@ -170,7 +171,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "对随机敌人进行普通攻击，基于你的攻击力与对方防御力，造成伤害"
   },
   "boneShield": {
    "id": "boneShield",
@@ -187,7 +190,15 @@ export default {
    "states": [
     "boneShield"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "boneShield",
+     "duration": 3,
+     "value": "(8+.5*(level))"
+    }
+   ],
+   "value": null,
+   "effectStr": "提升（8+技能等级*0.5）防御，持续3回合。\n接下来受到的3次伤害，降低至1点，触发3次后结束骨盾效果。"
   },
   "corrosiveBreath": {
    "id": "corrosiveBreath",
@@ -204,7 +215,15 @@ export default {
    "states": [
     "corrosiveBreath"
    ],
-   "value": "5*attacking"
+   "stateValues": [
+    {
+     "stateId": "corrosiveBreath",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "5*attacking",
+   "effectStr": "向生命值最高的敌人喷吐腐蚀液体，造成(6 + 目标最大生命值5% + 攻击80% + 技能等级*0.25)点无视防御的伤害，使其防御-6，持续3回合。\n伤害不会超过自身攻击力的500%。"
   },
   "summonBerryBird": {
    "id": "summonBerryBird",
@@ -219,7 +238,9 @@ export default {
     "Summon"
    ],
    "states": [],
-   "value": "5+.1*attacking+.2*level"
+   "stateValues": [],
+   "value": "5+.1*attacking+.2*level",
+   "effectStr": "召唤浆果鸟为你战斗，其攻击为（5+攻击10%+技能等级*0.2），持续3回合"
   },
   "baseHeal": {
    "id": "baseHeal",
@@ -234,7 +255,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": "10+intelligence+4*(level)",
+   "effectStr": "治疗生命值最低的受伤友方单位，回复(10 + 智力*100% + 技能等级*4)点生命值"
   },
   "poison": {
    "id": "poison",
@@ -251,7 +274,15 @@ export default {
    "states": [
     "poison"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "poison",
+     "duration": 6,
+     "value": "(15+intelligence*(.3+.03*(level)))"
+    }
+   ],
+   "value": null,
+   "effectStr": "为一个随机未中毒的敌人附加中毒状态（每回合开始时受到(15 + 智力(30 + 技能等级*3)%)点伤害，持续6回合）"
   },
   "selfHeal": {
    "id": "selfHeal",
@@ -268,7 +299,15 @@ export default {
    "states": [
     "selfHeal"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "selfHeal",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "为一个随机未拥有自愈状态的友方附加自我疗愈状态\n每回合开始时回复(5 + 释放者智力30% + 技能等级*4)点生命，持续3回合"
   },
   "sweep": {
    "id": "sweep",
@@ -283,7 +322,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "10+Math.floor(attacking*(.8+.01*level)+strength*(.5+.01*level))"
+   "stateValues": [],
+   "value": "10+Math.floor(attacking*(.8+.01*level)+strength*(.5+.01*level))",
+   "effectStr": "对所有敌人造成(10 + 攻击力(80 + 技能等级*1)% + 力量(50 + 技能等级*1)%)点伤害"
   },
   "baseGroupHeal": {
    "id": "baseGroupHeal",
@@ -298,7 +339,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": "10+.6*intelligence+2*(level)",
+   "effectStr": "为所有友方单位回复(10 + 智力60% + 技能等级*2)点生命值"
   },
   "powerStrike": {
    "id": "powerStrike",
@@ -313,7 +356,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "10+1.2*strength+2*level+1.5*attacking"
+   "stateValues": [],
+   "value": "10+1.2*strength+2*level+1.5*attacking",
+   "effectStr": "对行动顺序最前方的敌人造成(10 + 力量120% + 攻击力150% + 技能等级*2)点伤害，忽略50%防御。"
   },
   "guardianLaser": {
    "id": "guardianLaser",
@@ -330,7 +375,15 @@ export default {
    "states": [
     "guardianLaserResist"
    ],
-   "value": "10+2*level"
+   "stateValues": [
+    {
+     "stateId": "guardianLaserResist",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "10+2*level",
+   "effectStr": "对所有敌人造成(10 + 目标当前生命值(15 + 技能等级*0.15)% + 技能等级*2)点伤害，忽略30%防御值，并对其施加“激光抵抗”\n该伤害不会使目标生命值低于1点。\n该伤害中，对当前生命值进行计算的部分，伤害不会超过自身攻击力500%"
   },
   "lavaBreath": {
    "id": "lavaBreath",
@@ -347,7 +400,15 @@ export default {
    "states": [
     "burn"
    ],
-   "value": "18+attacking*(1.1+.02*level)"
+   "stateValues": [
+    {
+     "stateId": "burn",
+     "duration": 4,
+     "value": null
+    }
+   ],
+   "value": "18+attacking*(1.1+.02*level)",
+   "effectStr": "对所有敌人造成(18 + 攻击力(110 + 技能等级*2)%)点伤害\n并有40%概率使目标灼烧，持续4回合）"
   },
   "dragonRoar": {
    "id": "dragonRoar",
@@ -365,7 +426,15 @@ export default {
    "states": [
     "dragonRoarDebuff"
    ],
-   "value": "8+1*(level)"
+   "stateValues": [
+    {
+     "stateId": "dragonRoarDebuff",
+     "duration": 1,
+     "value": "(Math.floor(8+1*(level)))"
+    }
+   ],
+   "value": "8+1*(level)",
+   "effectStr": "震慑所有敌人，造成（自身最大生命值40% + 耐力130%）的伤害，并使其攻击、防御降低(8 + 技能等级*1)，持续1回合"
   },
   "doubleStrike": {
    "id": "doubleStrike",
@@ -380,7 +449,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "15+1.4*attacking+dexterity*(1.4+.02*level)"
+   "stateValues": [],
+   "value": "15+1.4*attacking+dexterity*(1.4+.02*level)",
+   "effectStr": "对随机两个敌人各造成(15 + 敏捷140% + 攻击力(140 + 技能等级*2)%)点伤害"
   },
   "lowestHpStrike": {
    "id": "lowestHpStrike",
@@ -395,7 +466,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "15+1*attacking+dexterity*(1.2+.03*level)"
+   "stateValues": [],
+   "value": "15+1*attacking+dexterity*(1.2+.03*level)",
+   "effectStr": "对生命值最低的敌人造成(15 + 攻击力100% + 敏捷(120 + 技能等级*3)%)点伤害，目标每失去10%生命值，伤害增加（攻击力20%）点"
   },
   "explosiveShot": {
    "id": "explosiveShot",
@@ -410,7 +483,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "10+attacking*(1.5+.08*level)"
+   "stateValues": [],
+   "value": "10+attacking*(1.5+.08*level)",
+   "effectStr": "对随机一个主要目标造成(10 + 攻击力(150 + 技能等级*8)%点伤害\n对另外两个敌人各造成(10 + 攻击力(80 + 技能等级*4)%)点伤害"
   },
   "freeze": {
    "id": "freeze",
@@ -428,7 +503,15 @@ export default {
    "states": [
     "frozen"
    ],
-   "value": "6+1.1*intelligence+4*level"
+   "stateValues": [
+    {
+     "stateId": "frozen",
+     "duration": 1,
+     "value": null
+    }
+   ],
+   "value": "6+1.1*intelligence+4*level",
+   "effectStr": "对随机敌人造成(6 + 智力110% + 技能等级*4)点伤害，并有(30% + 技能等级*1)概率使其冻结（跳过下回合）"
   },
   "iceBomb": {
    "id": "iceBomb",
@@ -446,7 +529,15 @@ export default {
    "states": [
     "frozen"
    ],
-   "value": "8+1.5*attacking+4*level"
+   "stateValues": [
+    {
+     "stateId": "frozen",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "8+1.5*attacking+4*level",
+   "effectStr": "对随机两个敌人各造成(8 + 攻击力150% + 技能等级*4)点伤害，并有40%概率造成2回合冻结"
   },
   "lifeDrain": {
    "id": "lifeDrain",
@@ -461,7 +552,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "5+intelligence*(.6+.01*level)"
+   "stateValues": [],
+   "value": "5+intelligence*(.6+.01*level)",
+   "effectStr": "对随机敌人造成(5 + 智力(80 + 技能等级*1)%)点伤害，无视防御，并为自身回复与最终伤害等量的生命值"
   },
   "roar": {
    "id": "roar",
@@ -476,7 +569,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "10+.8*strength+stamina*(1.2+.02*level)"
+   "stateValues": [],
+   "value": "10+.8*strength+stamina*(1.2+.02*level)",
+   "effectStr": "对所有敌人造成(10 + 力量80% + 耐力(120 + 技能等级*2)%)点伤害，忽视50%防御"
   },
   "blizzard": {
    "id": "blizzard",
@@ -494,7 +589,15 @@ export default {
    "states": [
     "frozen"
    ],
-   "value": "6+intelligence*(.8+.04*level)"
+   "stateValues": [
+    {
+     "stateId": "frozen",
+     "duration": 1,
+     "value": null
+    }
+   ],
+   "value": "6+intelligence*(.8+.04*level)",
+   "effectStr": "对所有敌人造成(6 + 智力(80 + 技能等级*4)%)点伤害，并有(30 + 技能等级*0.8)%概率冻结目标"
   },
   "ironWall": {
    "id": "ironWall",
@@ -511,7 +614,15 @@ export default {
    "states": [
     "ironWall"
    ],
-   "value": ".6*stamina"
+   "stateValues": [
+    {
+     "stateId": "ironWall",
+     "duration": 3,
+     "value": "(5+Math.floor(.6*stamina)+(level))"
+    }
+   ],
+   "value": ".6*stamina",
+   "effectStr": "提升防御，数值相当于(5 + 耐力*60% + 技能等级*1）”，持续3回合。期间受到的所有降低30%"
   },
   "curse": {
    "id": "curse",
@@ -528,7 +639,15 @@ export default {
    "states": [
     "curse"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "curse",
+     "duration": 3,
+     "value": "(6+(level))"
+    }
+   ],
+   "value": null,
+   "effectStr": "使随机目标虚弱，攻击、防御降低（6 + 技能等级*1），持续3回合"
   },
   "shadowBurst": {
    "id": "shadowBurst",
@@ -545,13 +664,21 @@ export default {
    "states": [
     "ancestorCrownRefreshSkill"
    ],
-   "value": "18+.9*intelligence+3*level"
+   "stateValues": [
+    {
+     "stateId": "ancestorCrownRefreshSkill",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "18+.9*intelligence+3*level",
+   "effectStr": "对所有敌人造成(18 + 智力90% + 技能等级*3)点伤害，对生命值高于70%的单位造成额外智力50%伤害"
   },
   "groupCurse": {
    "id": "groupCurse",
    "name": "群体诅咒",
    "tire": 2,
-   "target": "single_random_enemy",
+   "target": "all_enemy",
    "targetCount": 1,
    "colddown": 5,
    "mpCost": 20,
@@ -562,7 +689,15 @@ export default {
    "states": [
     "curse"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "curse",
+     "duration": 3,
+     "value": "(6+(level))"
+    }
+   ],
+   "value": null,
+   "effectStr": "诅咒敌方全体，使其虚弱，攻击、防御降低（6 + 技能等级*1），持续3回合"
   },
   "holyLight": {
    "id": "holyLight",
@@ -577,7 +712,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": "30+intelligence*(1.1+.02*level)"
+   "stateValues": [],
+   "value": "30+intelligence*(1.1+.02*level)",
+   "effectStr": "为一名生命值最低的友方单位回复(30 + 智力(110 + 技能等级*2)%)点生命，为其余友军恢复(10 + 智力(65 + 技能等级*1)%)点生命。"
   },
   "bless": {
    "id": "bless",
@@ -594,7 +731,15 @@ export default {
    "states": [
     "bless"
    ],
-   "value": "6+intelligence*(.2+.01*level)"
+   "stateValues": [
+    {
+     "stateId": "bless",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "6+intelligence*(.2+.01*level)",
+   "effectStr": "为所有友方单位提升攻击与防御(6 + 智力(20 + 技能等级*1)%)，持续3回合"
   },
   "revive": {
    "id": "revive",
@@ -609,7 +754,9 @@ export default {
     "Revive"
    ],
    "states": [],
-   "value": "40+.6*intelligence+2*level"
+   "stateValues": [],
+   "value": "40+.6*intelligence+2*level",
+   "effectStr": "随机复活一名阵亡友方单位，并回复其(40 + 智力60% + 技能等级*1)点生命，30%的魔法值，复活后清除所有状态。"
   },
   "groupRegen": {
    "id": "groupRegen",
@@ -627,7 +774,15 @@ export default {
    "states": [
     "regen"
    ],
-   "value": "10+intelligence*(.3+.025*level)"
+   "stateValues": [
+    {
+     "stateId": "regen",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "10+intelligence*(.3+.025*level)",
+   "effectStr": "为所有友方单位附加再生状态(每回合回复10 + 智力(35 + 技能等级*2.5)%)点生命，持续3回合）"
   },
   "astralBarrier": {
    "id": "astralBarrier",
@@ -644,7 +799,15 @@ export default {
    "states": [
     "astralBarrier"
    ],
-   "value": "10+.5*intelligence+1*level"
+   "stateValues": [
+    {
+     "stateId": "astralBarrier",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "10+.5*intelligence+1*level",
+   "effectStr": "为所有友方单位提升防御（10 + 智力50% + 技能等级*1）,并使他们受到的第一次超过最大生命值30%的伤害降低至0，持续3回合"
   },
   "astralBlast": {
    "id": "astralBlast",
@@ -662,7 +825,15 @@ export default {
    "states": [
     "silence"
    ],
-   "value": "16+intelligence*(.7+.01*level)"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "16+intelligence*(.7+.01*level)",
+   "effectStr": "对所有敌人造成(8 + 智力(70 + 技能等级*1.5)%)点魔法伤害，并有(30 + 技能等级*1)%概率使目标沉默（2回合，无法释放技能）"
   },
   "groupSilence": {
    "id": "groupSilence",
@@ -680,7 +851,20 @@ export default {
     "lastWord",
     "silence"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    },
+    {
+     "stateId": "lastWord",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "使所有敌人有(40% + 智力50% + 技能等级*1)概率沉默，持续2回合\n未被沉默的敌人获得“遗言”，持续3回合。"
   },
   "selfRepair": {
    "id": "selfRepair",
@@ -695,7 +879,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": "20+stamina*(1+.02*level)"
+   "stateValues": [],
+   "value": "20+stamina*(1+.02*level)",
+   "effectStr": "为自身回复(20 + 耐力(100% + 技能等级*2)%)点生命，并移除一个随机的负面状态"
   },
   "cleanse": {
    "id": "cleanse",
@@ -710,7 +896,9 @@ export default {
     "Buff"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "为随机一名有负面状态的友方单位移除所有负面状态"
   },
   "cometStrike": {
    "id": "cometStrike",
@@ -728,7 +916,15 @@ export default {
    "states": [
     "silence"
    ],
-   "value": "10+intelligence*(1.5+.04*level)"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "10+intelligence*(1.5+.04*level)",
+   "effectStr": "对随机敌人造成(10 + 智力(130 + 技能等级*4)%)点伤害，并有40%概率使目标沉默2回合"
   },
   "armorBreak": {
    "id": "armorBreak",
@@ -746,7 +942,15 @@ export default {
    "states": [
     "armorBreak"
    ],
-   "value": "8+1*attacking+dexterity*(1.6+.03*level)"
+   "stateValues": [
+    {
+     "stateId": "armorBreak",
+     "duration": 2,
+     "value": "(Math.floor(.3*defencing))"
+    }
+   ],
+   "value": "8+1*attacking+dexterity*(1.6+.03*level)",
+   "effectStr": "对防御最高的敌人造成(12 + 攻击力100% + 敏捷(160 + 技能等级*3)%)点伤害，忽略50%防御，然后使其防御-30%，持续2回合"
   },
   "starTrap": {
    "id": "starTrap",
@@ -763,7 +967,15 @@ export default {
    "states": [
     "stun"
    ],
-   "value": "10+intelligence*(1+.03*level)"
+   "stateValues": [
+    {
+     "stateId": "stun",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "10+intelligence*(1+.03*level)",
+   "effectStr": "对随机两个敌人造成(10 + 智力(100% + 技能等级*3)%)点伤害，并有50%概率使其眩晕2回合"
   },
   "emperorCatFinale_forAstralEmpressBoss": {
    "id": "emperorCatFinale_forAstralEmpressBoss",
@@ -782,7 +994,20 @@ export default {
     "silence",
     "stun"
    ],
-   "value": "30+1.2*intelligence+2*level"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    },
+    {
+     "stateId": "stun",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "30+1.2*intelligence+2*level",
+   "effectStr": "对所有敌人造成500 + (30 + 智力120% + 技能等级*2)点魔法伤害，此伤害将均摊给所有敌人，每个目标都有40%几率因此被沉默、眩晕，持续2回合"
   },
   "astralStorm": {
    "id": "astralStorm",
@@ -801,7 +1026,20 @@ export default {
     "silence",
     "stun"
    ],
-   "value": "8+intelligence*(1.8+.02*level)"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    },
+    {
+     "stateId": "stun",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "8+intelligence*(1.8+.02*level)",
+   "effectStr": "对所有敌人造成(40 + 智力(160 + 技能等级*2)%)点魔法伤害，并有(50 + 技能等级*2)%概率使目标沉默和眩晕各2回合"
   },
   "groupShield": {
    "id": "groupShield",
@@ -818,7 +1056,15 @@ export default {
    "states": [
     "shield"
    ],
-   "value": "40+.3*intelligence+2*level"
+   "stateValues": [
+    {
+     "stateId": "shield",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "40+.3*intelligence+2*level",
+   "effectStr": "为所有友方单位添加一个可吸收伤害的护盾（护盾值=40+智力30%+技能等级*2），持续2回合"
   },
   "sneak": {
    "id": "sneak",
@@ -835,7 +1081,15 @@ export default {
    "states": [
     "sneak"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "sneak",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "进入潜行状态，3回合内无法被敌人选为目标（群体技能不受影响）。"
   },
   "ambush": {
    "id": "ambush",
@@ -850,7 +1104,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "10+1.2*attacking+dexterity*(1.2+.03*level)"
+   "stateValues": [],
+   "value": "10+1.2*attacking+dexterity*(1.2+.03*level)",
+   "effectStr": "对生命值最低的敌人造成(10 + 攻击力120% + 敏捷(120 + 技能等级*3)%)点伤害\n若目标生命值低于50%则此伤害额外提升50%\n若自身处于潜行状态下，则此伤害还将额外提升50%。"
   },
   "poisonClaw": {
    "id": "poisonClaw",
@@ -868,7 +1124,15 @@ export default {
    "states": [
     "venom"
    ],
-   "value": "25+.95*attacking+dexterity*(.95+.03*level)"
+   "stateValues": [
+    {
+     "stateId": "venom",
+     "duration": 3,
+     "value": "(Math.ceil(.15*defencing))"
+    }
+   ],
+   "value": "25+.95*attacking+dexterity*(.95+.03*level)",
+   "effectStr": "对生命值最低的敌人造成(25 + 攻击力95% + 敏捷(95 + 技能等级*3)%)点伤害\n并使目标获得剧毒（失去15%护甲，每回合受到(15+15%当前生命)点伤害，持续3回合）。"
   },
   "shadowStep": {
    "id": "shadowStep",
@@ -886,7 +1150,15 @@ export default {
    "states": [
     "sneak"
    ],
-   "value": "8+.5*dexterity+.5*level"
+   "stateValues": [
+    {
+     "stateId": "sneak",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "8+.5*dexterity+.5*level",
+   "effectStr": "立即进入潜行状态（2回合），并回复(8 + 敏捷(50 + 技能等级*5)%)点生命值。"
   },
   "silenceStrike": {
    "id": "silenceStrike",
@@ -904,7 +1176,15 @@ export default {
    "states": [
     "silence"
    ],
-   "value": "15+1*attacking+dexterity*(1+.04*level)"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "15+1*attacking+dexterity*(1+.04*level)",
+   "effectStr": "对技能最多的敌人造成(15 + 攻击力100% + (敏捷100% + 技能等级*4)%)点伤害，并沉默2回合（无法释放技能）。"
   },
   "slientSmokeScreen": {
    "id": "slientSmokeScreen",
@@ -922,7 +1202,15 @@ export default {
    "states": [
     "sneak"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "sneak",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "所有敌人一个随机技能进入3回合冷却，自身进入潜行状态（2回合）。"
   },
   "mirrorImage": {
    "id": "mirrorImage",
@@ -939,7 +1227,15 @@ export default {
    "states": [
     "sneak"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "sneak",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "制造一个基础自身完整属性的，且拥有1回合隐匿的影分身\n分身只有1点生命值，持续4回合。"
   },
   "shadowAssassinUlt": {
    "id": "shadowAssassinUlt",
@@ -956,7 +1252,15 @@ export default {
    "states": [
     "sneak"
    ],
-   "value": ".02*dexterity"
+   "stateValues": [
+    {
+     "stateId": "sneak",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": ".02*dexterity",
+   "effectStr": "在敌阵中高速穿梭，对敌人进行(5 + (敏捷*0.02，向下取整))次标记（优先选择不同目标）\n，每被标记1次，都将受到(攻击120% + 敏捷(120 + 技能等级*4)%)点伤害\n若目标生命值低于50%，则本次攻击伤害翻倍。\n若自身处于潜行状态，则结束潜行。\n若自身不处于潜行，则进入潜行状态，持续2回合。"
   },
   "stardustMouseSwap": {
    "id": "stardustMouseSwap",
@@ -971,7 +1275,10 @@ export default {
     "Debuff"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "从（1+智力10%）名敌人身上各偷取(1+智力10%)个可移除的随机增益状态并转移给自己，该敌有100%几率进入慌乱状态（所有的行为将不分敌我），持续2回合。\n目标每点智力降低2%被慌乱的几率。",
+   "neverCast": true
   },
   "dizzySpin": {
    "id": "dizzySpin",
@@ -989,7 +1296,15 @@ export default {
    "states": [
     "stun"
    ],
-   "value": "12+.6*attacking+strength*(.6+.02*level)"
+   "stateValues": [
+    {
+     "stateId": "stun",
+     "duration": 1,
+     "value": null
+    }
+   ],
+   "value": "12+.6*attacking+strength*(.6+.02*level)",
+   "effectStr": "对所有敌人造成(12 + 攻击力60% + 力量(60 + 技能等级*2)% + 此敌人耐力120%)伤害，并有(40%+技能等级*1)概率眩晕1回合"
   },
   "carouselOverdrive": {
    "id": "carouselOverdrive",
@@ -1004,7 +1319,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "1.5*attacking+stamina*(2.5+.05*level)"
+   "stateValues": [],
+   "value": "1.5*attacking+stamina*(2.5+.05*level)",
+   "effectStr": "对随机单位（不分敌我）造成(攻击力150% + 耐力(250 + 技能等级*5)%)的伤害\n如果此次攻击的是友军，额外对一个随机敌人造成(攻击力200% + 耐力(300 + 技能等级*5)% + 自身最大生命值30%)伤害"
   },
   "candyBomb": {
    "id": "candyBomb",
@@ -1020,7 +1337,9 @@ export default {
     "Debuff"
    ],
    "states": [],
-   "value": "14+attacking*(.6+.02*level)+intelligence*(.6+.02*level)"
+   "stateValues": [],
+   "value": "14+attacking*(.6+.02*level)+intelligence*(.6+.02*level)",
+   "effectStr": "随机两名敌人各造成(14 + 攻击力(60 + 技能等级*2)% + (智力60 + 技能等级*2)%)点伤害，并有（40%+技能等级*1）概率使目标获得一个随机负面状态（剧毒、眩晕、沉默、灼烧），持续2回合"
   },
   "prankSmoke": {
    "id": "prankSmoke",
@@ -1037,7 +1356,15 @@ export default {
    "states": [
     "fluster"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "fluster",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "使所有敌人进入恐慌状态（行动目标随机，持续2回合）\n敌人每有1点智力，恐慌几率降低2%"
   },
   "mercenaryTaunt": {
    "id": "mercenaryTaunt",
@@ -1054,7 +1381,15 @@ export default {
    "states": [
     "taunt"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "taunt",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "嘲讽所有敌人，持续3回合"
   },
   "plushTaunt": {
    "id": "plushTaunt",
@@ -1073,7 +1408,20 @@ export default {
     "defUp",
     "taunt"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "taunt",
+     "duration": 3,
+     "value": null
+    },
+    {
+     "stateId": "defUp",
+     "duration": 3,
+     "value": "15+1*(level)"
+    }
+   ],
+   "value": null,
+   "effectStr": "嘲讽所有敌人（选择敌人作为目标时，优先选择嘲讽来源），持续3回合，并提升自身防御(15+技能等级*1)，持续2回合"
   },
   "starlightSanctuary": {
    "id": "starlightSanctuary",
@@ -1088,7 +1436,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": ".8*intelligence+(targetMaxHp-targetHp)*(.15+.005*level)",
+   "effectStr": "为所有友军回复(智力80% + (15 + 技能等级*0.5)%已损失生命)点生命，并驱散一个随机负面效果"
   },
   "ghostlyStrike": {
    "id": "ghostlyStrike",
@@ -1106,7 +1456,15 @@ export default {
    "states": [
     "stun"
    ],
-   "value": ".6*attacking+dexterity*(.8+.03*level)"
+   "stateValues": [
+    {
+     "stateId": "stun",
+     "duration": 1,
+     "value": null
+    }
+   ],
+   "value": ".6*attacking+dexterity*(.8+.03*level)",
+   "effectStr": "对一名当前生命值最低敌人造成(攻击力60%+敏捷(80 + 技能等级*3)%)伤害，忽略20%护甲\n对最大生命值最低的敌人造成(攻击力60%+敏捷(80 + 技能等级*3)%)伤害，有20%概率造成1回合眩晕\n如果选中了同一目标，则额外造成(攻击力60%+敏捷(80 + 技能等级*3)%)伤害"
   },
   "paradeHorn": {
    "id": "paradeHorn",
@@ -1123,7 +1481,15 @@ export default {
    "states": [
     "atkUp"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "atkUp",
+     "duration": 4,
+     "value": "20+level"
+    }
+   ],
+   "value": null,
+   "effectStr": "为所有友军提升攻击（20 + 技能等级*1），持续4回合"
   },
   "clownSummon": {
    "id": "clownSummon",
@@ -1139,13 +1505,15 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "召唤(1+技能等级*0.4)只糖果小丑猫助战，持续10回合，若己方已存在小丑猫，则为所有小丑猫回复(最大生命值30%)生命"
   },
   "kingAegis": {
    "id": "kingAegis",
    "name": "猫王庇护",
    "tire": 3,
-   "target": "self",
+   "target": "all_ally",
    "targetCount": 1,
    "colddown": 7,
    "mpCost": 16,
@@ -1156,7 +1524,15 @@ export default {
    "states": [
     "shield"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "shield",
+     "duration": 2,
+     "value": "(Math.floor(targetMaxHp*(.15+.005*(level))))"
+    }
+   ],
+   "value": "targetMaxHp*(.15+.005*(level))",
+   "effectStr": "为所有友军添加护盾，数额等于目标最大生命值(15 + 技能等级*0.5)%，持续3回合"
   },
   "sealMagic": {
    "id": "sealMagic",
@@ -1174,7 +1550,15 @@ export default {
    "states": [
     "skillSeal"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "skillSeal",
+     "duration": 4,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "对一名技能最多的敌人造成(12 + 智力(140 + 技能等级*5)% + 此敌人技能数量*45）伤害\n对所有拥有正在冷却中技能的敌人，对其施加技能封印（技能冷却暂停，持续4回合）"
   },
   "banish": {
    "id": "banish",
@@ -1192,7 +1576,15 @@ export default {
    "states": [
     "banished"
    ],
-   "value": "18+2*intelligence+8*level"
+   "stateValues": [
+    {
+     "stateId": "banished",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "18+2*intelligence+8*level",
+   "effectStr": "对一名随机敌人造成(18 + 智力200% + 技能等级*8)无视防御的伤害，并有50%概率为其附加“驱逐”，持续3回合"
   },
   "bind": {
    "id": "bind",
@@ -1210,7 +1602,15 @@ export default {
    "states": [
     "frozen"
    ],
-   "value": "10+.6*attacking"
+   "stateValues": [
+    {
+     "stateId": "frozen",
+     "duration": 1,
+     "value": null
+    }
+   ],
+   "value": "10+.6*attacking",
+   "effectStr": "对一名敌人造成(10 + 攻击力60%)伤害，并使其无法行动（1回合）"
   },
   "detectMagic": {
    "id": "detectMagic",
@@ -1225,7 +1625,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "移除所有敌人1个随机增益状态，并对每个敌人造成(8 + 智力60% + 共驱散状态数量 * 10 + 技能等级 * 5)伤害，无视50%防御"
   },
   "punish": {
    "id": "punish",
@@ -1240,7 +1642,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": "(14+.7*intelligence+1.3*targetIntelligence)",
+   "effectStr": "对一名随机敌人造成(14 + 智力70% + 目标智力130%)伤害。\n若其拥有增益状态则额外造成(智力50% + 目标智力70%)伤害，且使此技能的伤害无视防御"
   },
   "confuse": {
    "id": "confuse",
@@ -1257,7 +1661,15 @@ export default {
    "states": [
     "fluster"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "fluster",
+     "duration": 4,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "使一名敌人进入‘慌乱’状态，持续4回合"
   },
   "forbiddenMagic": {
    "id": "forbiddenMagic",
@@ -1276,7 +1688,20 @@ export default {
     "fluster",
     "silence"
    ],
-   "value": "40+1.4*intelligence"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    },
+    {
+     "stateId": "fluster",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "40+1.4*intelligence",
+   "effectStr": "失去(10 + 当前生命值的10%)点生命值，对所有敌人造成(40 + 智力140% + 技能等级*8)伤害，并有30%概率沉默2回合\n自身被扰乱3回合"
   },
   "ultimateLibraryJudgement": {
    "id": "ultimateLibraryJudgement",
@@ -1296,7 +1721,25 @@ export default {
     "silence",
     "skillSeal"
    ],
-   "value": "120+2*intelligence+20*level"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 3,
+     "value": null
+    },
+    {
+     "stateId": "skillSeal",
+     "duration": 3,
+     "value": null
+    },
+    {
+     "stateId": "banished",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "120+2*intelligence+20*level",
+   "effectStr": "对所有敌人造成(120 + 智力200% + 技能等级*20)点真实伤害，移除所有增益状态，并有60%概率沉默、50%概率封印技能、40%概率驱逐，持续3回合。"
   },
   "chainWhip": {
    "id": "chainWhip",
@@ -1312,7 +1755,9 @@ export default {
     "Debuff"
    ],
    "states": [],
-   "value": "15+.8*attacking+2*level"
+   "stateValues": [],
+   "value": "15+.8*attacking+2*level",
+   "effectStr": "用锁链鞭打行动顺序最前的敌人，造成(15 + 攻击力80% + 技能等级*2)点伤害，并有50%概率将其行动顺序向后移动1轮"
   },
   "fearInduction": {
    "id": "fearInduction",
@@ -1329,7 +1774,15 @@ export default {
    "states": [
     "fluster"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "fluster",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "恐吓直面自己的敌人，对行动顺序最前的敌人施加慌乱状态，持续3回合"
   },
   "soulDrain": {
    "id": "soulDrain",
@@ -1345,7 +1798,9 @@ export default {
     "Heal"
    ],
    "states": [],
-   "value": "20+1.2*intelligence+3*level"
+   "stateValues": [],
+   "value": "20+1.2*intelligence+3*level",
+   "effectStr": "吸取敌人的灵魂，造成(20 + 智力120% + 技能等级*3)点无视防御伤害，并回复等量生命值"
   },
   "demonicRage": {
    "id": "demonicRage",
@@ -1362,7 +1817,15 @@ export default {
    "states": [
     "demonicRage"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "demonicRage",
+     "duration": 4,
+     "value": "100+(level)"
+    }
+   ],
+   "value": null,
+   "effectStr": "进入狂怒状态，提升自身(100 + 技能等级)点攻击力，但防御力变为0，持续4回合"
   },
   "spectralClaw": {
    "id": "spectralClaw",
@@ -1377,7 +1840,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "24+1*dexterity+2*level"
+   "stateValues": [],
+   "value": "24+1*dexterity+2*level",
+   "effectStr": "用幽灵化的利爪快速攻击目标，造成(24 + 敏捷100% + 技能等级*2)点伤害，忽略30%防御"
   },
   "hauntingWail": {
    "id": "hauntingWail",
@@ -1395,7 +1860,15 @@ export default {
    "states": [
     "silence"
    ],
-   "value": "10+.8*intelligence"
+   "stateValues": [
+    {
+     "stateId": "silence",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "10+.8*intelligence",
+   "effectStr": "发出怨恨的哀嚎，对所有敌人造成(10 + 智力80%)点伤害，并有70%概率使其沉默2回合"
   },
   "vengeanceStrike": {
    "id": "vengeanceStrike",
@@ -1410,7 +1883,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "30+1.5*attacking+.8*targetMaxHp"
+   "stateValues": [],
+   "value": "30+1.5*attacking+.8*targetMaxHp",
+   "effectStr": "释放复仇之力，造成(30 + 攻击力150% + 自身已损失生命值80%)点伤害"
   },
   "despairAura": {
    "id": "despairAura",
@@ -1427,7 +1902,15 @@ export default {
    "states": [
     "despair"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "despair",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "散发绝望的气息，使所有敌人陷入绝望状态（每回合开始时损失5%最大生命值），持续3回合"
   },
   "phantomStrike": {
    "id": "phantomStrike",
@@ -1442,7 +1925,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "25+1.5*dexterity+3*level"
+   "stateValues": [],
+   "value": "25+1.5*dexterity+3*level",
+   "effectStr": "如幽灵般突然出现攻击行动顺序最后的敌人，造成(25 + 敏捷150% + 技能等级*3)点伤害，忽略50%防御，并使其移动至行动顺序第一位"
   },
   "mentalBreak": {
    "id": "mentalBreak",
@@ -1460,7 +1945,15 @@ export default {
    "states": [
     "fluster"
    ],
-   "value": "15+1.8*intelligence+.5*intelligence"
+   "stateValues": [
+    {
+     "stateId": "fluster",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "15+1.8*intelligence+.5*targetIntelligence",
+   "effectStr": "对随机3个敌人施加精神攻击，造成(15 + 目标智力150%)点精神伤害，并有60%概率使其陷入慌乱状态，持续2回合"
   },
   "painAmplifier": {
    "id": "painAmplifier",
@@ -1477,7 +1970,15 @@ export default {
    "states": [
     "painAmplified"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "painAmplified",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "对随机敌人施加痛苦放大状态，使其每次受到伤害时额外受到10%当前生命值的伤害，持续3回合"
   },
   "tortureProtocol": {
    "id": "tortureProtocol",
@@ -1492,7 +1993,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "8+.8*attacking+2*level"
+   "stateValues": [],
+   "value": "8+.8*attacking+2*level",
+   "effectStr": "对所有敌人造成(8 + 攻击力80% + 技能等级 * 2)点伤害"
   },
   "mechanicalGrip": {
    "id": "mechanicalGrip",
@@ -1510,7 +2013,15 @@ export default {
    "states": [
     "stun"
    ],
-   "value": "18+1.2*attacking+2*level"
+   "stateValues": [
+    {
+     "stateId": "stun",
+     "duration": 3,
+     "value": null
+    }
+   ],
+   "value": "18+1.2*attacking+2*level",
+   "effectStr": "用机械臂钳制敏捷最低的敌人，造成(18 + 攻击力120% + 技能等级*2)点伤害，并使其眩晕3回合"
   },
   "shadowCorruption": {
    "id": "shadowCorruption",
@@ -1526,7 +2037,9 @@ export default {
     "Debuff"
    ],
    "states": [],
-   "value": "35+1*attacking"
+   "stateValues": [],
+   "value": "35+1*attacking",
+   "effectStr": "用暗影力量腐蚀行动顺序最后的敌人，造成(35 + 攻击力100%)点伤害，其行动顺序前每有一个单位，额外造成(目标已损失生命值15%)点伤害"
   },
   "nightmareSlam": {
    "id": "nightmareSlam",
@@ -1542,7 +2055,9 @@ export default {
     "Debuff"
    ],
    "states": [],
-   "value": "45+1.8*attacking+1*strength"
+   "stateValues": [],
+   "value": "45+1.8*attacking+1*strength",
+   "effectStr": "用噩梦之力重击行动顺序最前方的敌人，造成(45 + 攻击力180% + 力量100%)点伤害，并将其行动顺序向后移动1轮"
   },
   "apocalypticRoar": {
    "id": "apocalypticRoar",
@@ -1557,7 +2072,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": "20+2*attacking+.8*targetMaxHp"
+   "stateValues": [],
+   "value": "20+2*attacking+.8*targetMaxHp",
+   "effectStr": "发出震撼灵魂的末日咆哮，对所有敌人造成(20 + 攻击力200% + 自身已损失生命值50%)点伤害"
   },
   "prisonDomination": {
    "id": "prisonDomination",
@@ -1574,7 +2091,15 @@ export default {
    "states": [
     "stun"
    ],
-   "value": "35+1.5*attacking+8*level"
+   "stateValues": [
+    {
+     "stateId": "stun",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": "35+1.5*attacking+8*level",
+   "effectStr": "展现霸主威严，对所有敌人造成(35 + 攻击力150% + 技能等级*8)点伤害"
   },
   "darkRitual": {
    "id": "darkRitual",
@@ -1591,7 +2116,9 @@ export default {
     "Summon"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "进行黑暗仪式，己方每阵亡一个单位，回复自身(最大生命值15%)点生命值，并永久提升10点攻击力。\n每一个阵亡的友军还将额外召唤一个绝望幻影，持续5回合"
   },
   "strengthInKittyNumbers": {
    "id": "strengthInKittyNumbers",
@@ -1606,7 +2133,9 @@ export default {
     "Damage"
    ],
    "states": [],
-   "value": null
+   "stateValues": [],
+   "value": null,
+   "effectStr": "对一个随机敌人造成攻击力100%的伤害\n己方阵营每存在1个非召唤物的单位，此伤害提高50%。"
   },
   "lightsOut": {
    "id": "lightsOut",
@@ -1623,7 +2152,15 @@ export default {
    "states": [
     "fluster"
    ],
-   "value": null
+   "stateValues": [
+    {
+     "stateId": "fluster",
+     "duration": 2,
+     "value": null
+    }
+   ],
+   "value": null,
+   "effectStr": "为所有单位施加“扰乱”，持续1回合"
   }
  }
 };

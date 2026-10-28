@@ -10,12 +10,17 @@ import { Server as SocketServer } from "socket.io";
 import { b as actionGroupCatalog, c as battleMonsterCatalog, f as farmingCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
 import { a as resourceCatalog } from "../pulled-frontend/_nuxt/game-json-resources-C7HDgHOG.js";
 import {
+  applyIncomingDamage,
+  applyStateTurnStart,
   grantSkillExp,
+  isConfused,
   isIncapacitated,
+  isUntargetable,
   resolveSkillEffects,
   selectSkill,
   skillExpToNext,
   stateLabel,
+  tauntSources,
   tickStates
 } from "./battle-skills.js";
 
@@ -2707,6 +2712,23 @@ function finishBattle(room, result) {
   schedulePersist();
 }
 
+/**
+ * 普攻选目标：潜行的单位不能被选中（全员潜行时退回全体随机）、
+ * 有嘲讽就打嘲讽来源、自己处于慌乱状态时不分敌我。
+ */
+function pickBasicAttackTarget(actor, opponents, members) {
+  const pick = (list) => (list.length ? list[Math.floor(Math.random() * list.length)] : null);
+  if (isConfused(actor)) {
+    const anyone = members.filter((unit) => unit.hp > 0 && unit.uuid !== actor.uuid);
+    if (anyone.length) return pick(anyone);
+  }
+  const alive = opponents.filter((unit) => unit.hp > 0);
+  const visible = alive.filter((unit) => !isUntargetable(unit));
+  const pool = visible.length ? visible : alive;
+  const taunted = tauntSources(pool);
+  return pick(taunted.length ? taunted : pool);
+}
+
 function resolveBattleTurn(room) {
   const battleInfo = room.memberIds.map((uuid) => players.get(uuid)?.battleInfo).find(Boolean);
   if (!battleInfo || room.status !== "battling") return;
@@ -2733,6 +2755,30 @@ function resolveBattleTurn(room) {
   for (const stateId of expiredStates) {
     emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${stateLabel(stateId)} 结束` });
   }
+  // 中毒/绝望在回合开始掉血，自我疗愈/再生回血 —— 结算完再决定这一回合还能不能行动
+  const stateTick = applyStateTurnStart(actor, { members: battleInfo.members });
+  for (const hit of stateTick.damage) {
+    emitRoomEvent(room, "battle:floatText:success", { unit: hit.unit, text: `-${hit.value}` });
+    emitRoomEvent(room, "battle:dealDamage:success", {
+      source: hit.sourceUnitUuid || hit.unit,
+      type: "state",
+      castSkillId: hit.stateId,
+      target: [{ unit: hit.unit, value: hit.value, fDamage: hit.value, remainingHp: actor.hp, damageType: "magical", shieldDamage: 0, causeBy: { type: "state", stateId: hit.stateId } }],
+      sourceUnitUuid: hit.sourceUnitUuid || hit.unit,
+      targetUnitUuidList: [hit.unit],
+      damageType: "magical"
+    });
+    appendBattleLog(room, "damage", {
+      source: hit.sourceUnitUuid || hit.unit,
+      type: "state",
+      castSkillId: hit.stateId,
+      damage: [{ unit: hit.unit, value: hit.value, fDamage: hit.value, remainingHp: actor.hp, damageType: "magical", causeBy: { type: "state", stateId: hit.stateId } }]
+    });
+  }
+  for (const tick of stateTick.heal) {
+    emitRoomEvent(room, "battle:heal:success", { source: source, target: tick.unit, value: tick.value, reason: "state", stateId: tick.stateId });
+    emitRoomEvent(room, "battle:floatText:success", { unit: tick.unit, text: `+${tick.value}` });
+  }
   for (const skillId of Object.keys(actor.skillColddown || {})) {
     const left = Number(actor.skillColddown[skillId]) || 0;
     if (left <= 1) delete actor.skillColddown[skillId];
@@ -2745,9 +2791,9 @@ function resolveBattleTurn(room) {
 
   emitRoomEvent(room, "battle:turnStart:success", { source });
 
-  // 控制类状态：本回合直接跳过（状态已在上面的 tickStates 里递减过）
-  if (isIncapacitated(actor)) {
-    emitRoomEvent(room, "battle:floatText:success", { unit: source, text: "无法行动" });
+  // 控制类状态 / 回合开始被状态打死：本回合直接跳过（状态已在上面的 tickStates 里递减过）
+  if (!(actor.hp > 0) || isIncapacitated(actor)) {
+    emitRoomEvent(room, "battle:floatText:success", { unit: source, text: actor.hp > 0 ? "无法行动" : "倒下" });
     appendBattleLog(room, "turn", { source, skipped: true });
     battleInfo.currentTurnIndex = (battleInfo.currentTurnIndex + 1) % Math.max(1, battleInfo.turnOrder.length);
     if (battleInfo.currentTurnIndex === 0) battleInfo.passedTurn += 1;
@@ -2764,9 +2810,22 @@ function resolveBattleTurn(room) {
 
   const ctx = { allies, enemies: opponents, passedTurn: battleInfo.passedTurn };
   // 技能页里启用的技能按拖拽顺序优先尝试；没有能放的（冷却/蓝量/条件/未实装）就退回普攻
-  const action = actorIsPlayer ? selectSkill(actor, ctx) : null;
-
+  let action = actorIsPlayer ? selectSkill(actor, ctx) : null;
+  const skillHelpers = {
+    defenceOf: (unit) => Number(unit.status?.defencing?.level) || Number(unit.defence) || 0,
+    finalDamage: battleFinalDamage
+  };
+  // 手写技能可能发现「现在放没意义」（比如驱散时没人中负面），这时退回普攻，不扣蓝不进冷却
+  let effects = null;
   if (action) {
+    effects = resolveSkillEffects(actor, action, skillHelpers, ctx);
+    if (effects.skipCast) {
+      action = null;
+      effects = null;
+    }
+  }
+
+  if (action && effects) {
     const { skill } = action;
     actor.mp = Math.max(0, (Number(actor.mp) || 0) - skill.mpCost);
     if (skill.mpCost > 0) {
@@ -2776,10 +2835,6 @@ function resolveBattleTurn(room) {
       actor.skillColddown = actor.skillColddown || {};
       actor.skillColddown[skill.id] = skill.colddown + 1;
     }
-    const effects = resolveSkillEffects(actor, action, {
-      defenceOf: (unit) => Number(unit.status?.defencing?.level) || Number(unit.defence) || 0,
-      finalDamage: battleFinalDamage
-    });
     emitRoomEvent(room, "battle:castSkill:success", { source, skillId: skill.id, skillName: skill.name });
 
     const targetPayload = [];
@@ -2835,8 +2890,17 @@ function resolveBattleTurn(room) {
         target: state.unit,
         stateId: state.stateId,
         stateName: stateLabel(state.stateId),
-        duration: state.duration
+        duration: state.duration,
+        actualValue: state.actualValue ?? null
       });
+    }
+    // 驱散（净化/识破魔法）和「让敌人技能进冷却」（静默烟雾弹）要让前端把状态/冷却抹掉
+    for (const item of effects.removedStates || []) {
+      emitRoomEvent(room, "battle:removeState:success", { source, target: item.unit, stateId: item.stateId, stateName: stateLabel(item.stateId) });
+      emitRoomEvent(room, "battle:floatText:success", { unit: item.unit, text: `${stateLabel(item.stateId)} 被驱散` });
+    }
+    for (const item of effects.cooldowns || []) {
+      emitRoomEvent(room, "battle:addColddown:success", { source, target: item.unit, skillId: item.skillId, colddown: item.colddown });
     }
     // 施放成功才有技能经验：让技能页的等级/经验条真正会涨
     const levelUps = grantSkillExp(actor, skill.id, SKILL_CAST_EXP);
@@ -2848,21 +2912,19 @@ function resolveBattleTurn(room) {
       emitToPlayer(actor.uuid, "character:getSkills:success", normalizePlayerSkills(players.get(actor.uuid)));
     }
   } else {
-    const target = opponents[Math.floor(Math.random() * opponents.length)];
+    // 普攻选目标要认状态：潜行的人选不到、嘲讽优先打嘲讽来源、慌乱的人不分敌我
+    const target = pickBasicAttackTarget(actor, opponents, battleInfo.members);
     if (!target) return;
     const attack = Number(actor.status?.attacking?.level) || Number(actor.attack) || 5;
     const defense = Number(target.status?.defencing?.level) || Number(target.defense) || 0;
     // 参考站的普通攻击没有随机浮动：固定基础伤害，再按目标的防御减免结算
     const damage = battleFinalDamage(attack, defense);
-    const shield = Math.max(0, Number(target.tmpShield) || 0);
-    const absorbed = Math.min(shield, damage);
-    target.tmpShield = shield - absorbed;
-    target.hp = Math.max(0, target.hp - (damage - absorbed));
+    const applied = applyIncomingDamage(target, damage);
     const damagePayload = {
       source,
       type: "skill",
       castSkillId: "baseAttack",
-      target: [{ unit: target.uuid, value: damage, fDamage: damage - absorbed, remainingHp: target.hp, damageType: "physical", shieldDamage: absorbed, causeBy: {} }],
+      target: [{ unit: target.uuid, value: damage, fDamage: applied.damage, remainingHp: target.hp, damageType: "physical", shieldDamage: applied.absorbedByShield, causeBy: {} }],
       sourceUnitUuid: source,
       targetUnitUuidList: [target.uuid],
       damageType: "physical"
