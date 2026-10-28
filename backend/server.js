@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import express from "express";
 import { Server as SocketServer } from "socket.io";
-import { c as battleMonsterCatalog, f as farmingCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
+import { b as actionGroupCatalog, c as battleMonsterCatalog, f as farmingCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
 import { a as resourceCatalog } from "../pulled-frontend/_nuxt/game-json-resources-C7HDgHOG.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -18,7 +18,7 @@ const actionDurationMs = (() => {
     if (!actionFile) return {};
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", actionFile), "utf8");
     const durations = {};
-    const pattern = /(?:^|,)([A-Za-z0-9_]+):\{id:"([^"]+)"[^{}]*?baseDuration:([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)/g;
+    const pattern = /(?:^|[,{])([A-Za-z0-9_]+):\{id:"([^"]+)"[^{}]*?baseDuration:([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)/g;
     for (const match of source.matchAll(pattern)) {
       const duration = Number(match[3]);
       if (Number.isFinite(duration) && duration > 0) durations[match[2]] = duration;
@@ -33,7 +33,7 @@ const actionImprovements = (() => {
     const actionFile = fs.readdirSync(path.join(frontendRoot, "_nuxt")).find((name) => name.startsWith("game-json-actions-") && name.endsWith(".js"));
     if (!actionFile) return {};
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", actionFile), "utf8");
-    const actions = [...source.matchAll(/(?:^|,)([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
+    const actions = [...source.matchAll(/(?:^|[,{])([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
     const improvements = {};
     actions.forEach((match, index) => {
       const start = match.index + (match[0].startsWith(",") ? 1 : 0);
@@ -56,7 +56,7 @@ const actionRewards = (() => {
     if (!actionFile) return {};
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", actionFile), "utf8");
     const rewards = {};
-    const actions = [...source.matchAll(/(?:^|,)([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
+    const actions = [...source.matchAll(/(?:^|[,{])([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
     actions.forEach((match, index) => {
       const start = match.index + (match[0].startsWith(",") ? 1 : 0);
       const end = actions[index + 1]?.index ?? source.length;
@@ -85,7 +85,7 @@ const actionRequirements = (() => {
     if (!actionFile) return {};
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", actionFile), "utf8");
     const requirements = {};
-    const actions = [...source.matchAll(/(?:^|,)([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
+    const actions = [...source.matchAll(/(?:^|[,{])([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
     actions.forEach((match, index) => {
       const start = match.index + (match[0].startsWith(",") ? 1 : 0);
       const end = actions[index + 1]?.index ?? source.length;
@@ -151,7 +151,7 @@ const itemUseEffects = (() => {
     const resourceFile = fs.readdirSync(path.join(frontendRoot, "_nuxt")).find((name) => name.startsWith("game-json-resources-") && name.endsWith(".js"));
     if (!resourceFile) return {};
     const source = fs.readFileSync(path.join(frontendRoot, "_nuxt", resourceFile), "utf8");
-    const resources = [...source.matchAll(/(?:^|,)([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
+    const resources = [...source.matchAll(/(?:^|[,{])([A-Za-z0-9_]+):\{id:"([^"]+)"/g)];
     const effects = {};
     resources.forEach((match, index) => {
       const start = match.index + (match[0].startsWith(",") ? 1 : 0);
@@ -2450,9 +2450,97 @@ function taskActionExists(actionId) {
   return Boolean(actionId && (actionDurationMs[actionId] || actionRewards[actionId] || actionImprovements[actionId] || actionRequirements[actionId]));
 }
 
-function makeTask(payload = {}) {
+// ---- 生活装备缩短动作耗时 ----
+// 装备的效果写在资源表的 onEquip[].actionDurationEffect 里，例如斧头
+// `{ action:"woodcutting", decrease:1000 }`、矿工腰带 `{ action:"allMiningAction", decreasePercent:.08 }`。
+// 字段有四种：increase / decrease（绝对毫秒）、increasePercent / decreasePercent（小数）。
+// action 可能是具体动作，也可能是 `allXxxAction` 分组（对应 jresource 里的分组表）+ `allAction`（全部动作）。
+// 注意 `fishing` / `farming` 既是动作名也恰好是分组名，这里按动作理解（分组要写 allFishingAction）。
+const ACTION_DURATION_GROUPS = {
+  allMiningAction: "mining",
+  allLevel1Manufacture: "level1Manufacture",
+  allForgingAction: "forging",
+  allSewingAction: "sewing",
+  allMysteriousAction: "mysterious",
+  allExerciseAction: "exercise",
+  allFarmingAnimalAction: "farmingAnimal",
+  allCookingAction: "cooking",
+  allCollectingAction: "collection",
+  allFishingAction: "fishing",
+  allExploreAction: "explore"
+};
+const MIN_TASK_DURATION_MS = 1000;
+const DEFAULT_TASK_DURATION_MS = 24e3;
+
+function actionDurationMatches(target, actionId) {
+  if (!target || !actionId) return false;
+  if (target === "allAction") return true;
+  const group = ACTION_DURATION_GROUPS[target];
+  if (group) return (actionGroupCatalog[group] || []).includes(actionId);
+  return target === actionId;
+}
+
+// 只算生活栏位（workEquipment）：同一件装备放进战斗栏位不该影响生活耗时。
+function workDurationModifier(player, actionId) {
+  let absolute = 0;
+  let percent = 0;
+  const slots = player?.workEquipment;
+  if (!slots || typeof slots !== "object" || Array.isArray(slots)) return { absolute, percent };
+  for (const resourceId of Object.values(slots)) {
+    const item = resourceCatalog[resourceId];
+    if (!item) continue;
+    for (const effect of item.onEquip || []) {
+      for (const entry of effect?.actionDurationEffect || []) {
+        if (!actionDurationMatches(String(entry?.action || ""), actionId)) continue;
+        absolute += (Number(entry.increase) || 0) - (Number(entry.decrease) || 0);
+        percent += (Number(entry.increasePercent) || 0) - (Number(entry.decreasePercent) || 0);
+      }
+    }
+  }
+  return { absolute, percent };
+}
+
+// 先叠绝对值再乘百分比，最后夹到前端展示用的 1000ms 下限（前端图表也是 Math.max(1e3, …)）。
+function taskDurationFor(player, actionId, base = actionDurationMs[actionId] || DEFAULT_TASK_DURATION_MS) {
+  const baseDuration = Number(base) > 0 ? Number(base) : DEFAULT_TASK_DURATION_MS;
+  if (!player) return baseDuration;
+  const { absolute, percent } = workDurationModifier(player, actionId);
+  if (!absolute && !percent) return baseDuration;
+  return Math.max(MIN_TASK_DURATION_MS, Math.round((baseDuration + absolute) * (1 + percent)));
+}
+
+// 换装/上线时重算队列里每项任务的时长：已完成比例不变，剩余时间按新时长等比缩放，
+// 否则玩家把装备换上后已经排着的任务还是旧时长（看起来"没生效"）。
+// 显式指定过 duration 的任务（durationOverride）按定值处理，不参与重算；
+// 老存档的任务没有 baseDuration，就把当时存下的 duration 当作基准（那时候还没算过装备）。
+function refreshWorkTaskDurations(player, now = Date.now()) {
+  if (!Array.isArray(player?.taskQueue) || !player.taskQueue.length) return false;
+  let changed = false;
+  for (const task of player.taskQueue) {
+    if (!task || task.durationOverride) continue;
+    const base = Number(task.baseDuration) || Number(task.duration) || actionDurationMs[task.actionId] || DEFAULT_TASK_DURATION_MS;
+    const next = taskDurationFor(player, task.actionId, base);
+    if (task.baseDuration !== base) {
+      task.baseDuration = base;
+      changed = true;
+    }
+    const previous = Number(task.duration) || 0;
+    if (!next || next === previous) continue;
+    const startedAt = Number(task.lastSubtaskDoneTime) || now;
+    const ratio = previous > 0 ? Math.min(1, Math.max(0, (now - startedAt) / previous)) : 0;
+    task.duration = next;
+    task.lastSubtaskDoneTime = now - Math.round(ratio * next);
+    changed = true;
+  }
+  return changed;
+}
+
+function makeTask(payload = {}, player = null) {
   const createTime = payload.createTime || Date.now();
   const suppliedDuration = Number(payload.duration);
+  // 显式 duration 视为定值（离线补算/运维用），不吃生活装备修正
+  const durationOverride = Number.isFinite(suppliedDuration) && suppliedDuration > 0;
+  const baseDuration = durationOverride ? suppliedDuration : actionDurationMs[payload.actionId] || DEFAULT_TASK_DURATION_MS;
   return {
     uuid: payload.uuid || crypto.randomUUID(),
     actionId: payload.actionId,
@@ -2460,7 +2548,9 @@ function makeTask(payload = {}) {
     currentRepeat: Math.max(0, Number(payload.currentRepeat) || 0),
     createTime,
     lastSubtaskDoneTime: payload.lastSubtaskDoneTime || createTime,
-    duration: Number.isFinite(suppliedDuration) && suppliedDuration > 0 ? suppliedDuration : actionDurationMs[payload.actionId] || 24e3,
+    baseDuration,
+    durationOverride: durationOverride || undefined,
+    duration: durationOverride ? suppliedDuration : taskDurationFor(player, payload.actionId, baseDuration),
     paused: Boolean(payload.paused),
     pauseReason: payload.pauseReason || null
   };
@@ -3108,6 +3198,11 @@ function runTaskQueue(socket) {
     dispatchTaskQueue(socket);
     return;
   }
+  // 上线/换装后队列里的时长要跟着生活装备走（这里幂等：没变化时直接跳过）
+  if (refreshWorkTaskDurations(player)) {
+    dispatchTaskQueue(socket);
+    schedulePersist();
+  }
   if (task.paused) {
     runner.timer = setTimeout(() => runTaskQueue(socket), 1000);
     return;
@@ -3334,7 +3429,7 @@ io.on("connection", (socket) => {
         emitGameEvent(socket, failureEvent, { message: "unknown action" });
         return;
       }
-      const task = makeTask(data);
+      const task = makeTask(data, socket.player);
       if (event === "task:immediatelyStart") socket.player.taskQueue.unshift(task);
       else socket.player.taskQueue.push(task);
       dispatchTaskQueue(socket);
@@ -3370,6 +3465,12 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:equip:success", { equipment: result.equipment, info: { resourceId } });
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+      // 生活装备带 actionDurationEffect：立刻重算已排队任务的时长并推给前端
+      if (result.type === "work" && refreshWorkTaskDurations(socket.player)) {
+        dispatchTaskQueue(socket);
+        startTaskRunner(socket);
+        schedulePersist();
+      }
       return;
     }
     if (event === "effectAction:unequipItem") {
@@ -3382,6 +3483,11 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:unequip:success", result.equipment);
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+      if (result.type === "work" && refreshWorkTaskDurations(socket.player)) {
+        dispatchTaskQueue(socket);
+        startTaskRunner(socket);
+        schedulePersist();
+      }
       return;
     }
     if (event === "character:updateProfile") {
