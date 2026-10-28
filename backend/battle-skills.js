@@ -351,6 +351,12 @@ export function pickTargets(def, unit, ctx) {
       return allies;
     case "single_random_ally":
     case "single_ally": {
+      // 复活要选「已经倒下」的友军；没人倒下就别放（否则只是白占一回合）
+      if ((def.types || []).includes("Revive")) {
+        const dead = (ctx.members || ctx.allies || [])
+          .filter((item) => !(item.hp > 0) && Boolean(item.isPlayerUnit) === Boolean(unit.isPlayerUnit));
+        return dead.length ? [pickRandom(dead)] : [];
+      }
       const target = pickRandom(allies);
       return target ? [target] : [];
     }
@@ -471,15 +477,30 @@ export function evalSkillLogic(logic, unit, ctx) {
 
 // ---- 选技能 ----
 
-// 召唤系统没做（战斗成员在开局就固定了），这两个技能放了也没有实体可加，
-// 与其空放浪费一回合，不如退回普攻。
-const SKIP_CAST = new Set(["clownSummon", "mirrorImage"]);
+// 召唤系统没做（战斗成员在开局就固定了），这些技能放了也没有实体可加，
+// 与其空放浪费一回合，不如退回普攻。summonBerryBird 的类型只有 Summon，
+// 抽出来的算式其实是召唤物的数值，若照伤害/治疗结算会是错的。
+const SKIP_CAST = new Set(["clownSummon", "mirrorImage", "summonBerryBird"]);
 
 function isCastable(def) {
   if (def.neverCast || SKIP_CAST.has(def.id)) return false;
   if (def.value) return Boolean(compileValue(def.value));
   if (Array.isArray(def.stateValues) && def.stateValues.length) return true;
   return Boolean(SKILL_HANDLERS[def.id]);
+}
+
+/**
+ * 参考站里怪物没配技能逻辑，玩家也可能不配；给纯治疗技能一条通用常识：
+ * 全员满血时放治疗只是白占一回合。带状态/手写实现的技能不拦（可能还有别的效果）。
+ */
+function healWouldMatter(def, ctx) {
+  const types = def.types || [];
+  if (!types.includes("Heal") || types.includes("Damage")) return true;
+  if ((def.states || []).length) return true;
+  if (SKILL_HANDLERS[def.id]) return true;
+  const allies = (ctx.allies || []).filter((item) => item.hp > 0);
+  if (!allies.length) return true;
+  return allies.some((item) => (Number(item.hp) || 0) < (Number(item.maxHp) || 0));
 }
 
 /**
@@ -500,6 +521,7 @@ export function selectSkill(unit, ctx) {
     if (!state || state.enabled === false) continue;
     if ((Number(unit.skillColddown?.[skillId]) || 0) > 0) continue;
     if ((Number(unit.mp) || 0) < (Number(def.mpCost) || 0)) continue;
+    if (!healWouldMatter(def, ctx)) continue;
     const targets = pickTargets(def, unit, ctx);
     if (!targets.length) continue;
     if (!evalSkillLogic(unit.skillLogic?.[skillId], unit, ctx)) continue;
@@ -744,7 +766,8 @@ export function resolveSkillEffects(unit, action, helpers, aiCtx = {}) {
     skipCast: false
   };
   const isDamage = skill.types.includes("Damage") && skill.damageType && skill.damageType !== "NoDamage";
-  const isHeal = skill.types.includes("Heal") && !isDamage;
+  // 复活按治疗结算：目标是 0 血单位时 addHeal 直接把它拉回 min(maxHp, 数值)
+  const isHeal = (skill.types.includes("Heal") || skill.types.includes("Revive")) && !isDamage;
   const isShield = skill.types.includes("Shield") && !isDamage && !isHeal;
   const targetCount = Math.max(1, targets.length);
   const ctx = {

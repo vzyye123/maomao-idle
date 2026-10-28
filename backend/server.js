@@ -2492,6 +2492,10 @@ function makeBattleInfo(room) {
     enemy.skills ||= { baseAttack: { level: 1, order: 0 } };
     enemy.skills.baseAttack ||= { level: 1, order: 0 };
     enemy.skills.baseAttack.order ??= 0;
+    // 参考站的怪物自带技能表（{id:{level}}），进战斗后按模板里的顺序当施放优先级，
+    // 和玩家一样走 selectSkill：冷却 / 蓝量 / 目标 / 条件全过才放，否则退回普攻。
+    enemy.skillOrder = Object.keys(enemy.skills).filter((id) => id !== "baseAttack");
+    enemy.skillLogic ||= {};
     enemy.ai ||= {};
     enemy.skillColddown = {};
     enemy.equipment ||= {};
@@ -2786,8 +2790,9 @@ function resolveBattleTurn(room) {
   }
 
   const actorIsPlayer = actor.isPlayerUnit;
-  const allies = battleInfo.members.filter((unit) => Boolean(unit.isPlayerUnit) === actorIsPlayer && unit.hp > 0);
-  const opponents = actorIsPlayer ? aliveEnemies : alivePlayers;
+  // 双方阵容都带上「已倒下」的成员：复活类技能要能找到尸体，其它流程各自过滤 hp>0
+  const allies = battleInfo.members.filter((unit) => Boolean(unit.isPlayerUnit) === actorIsPlayer);
+  const opponents = actorIsPlayer ? battleInfo.members.filter((unit) => !unit.isPlayerUnit) : battleInfo.members.filter((unit) => unit.isPlayerUnit);
 
   emitRoomEvent(room, "battle:turnStart:success", { source });
 
@@ -2808,9 +2813,9 @@ function resolveBattleTurn(room) {
     return;
   }
 
-  const ctx = { allies, enemies: opponents, passedTurn: battleInfo.passedTurn };
-  // 技能页里启用的技能按拖拽顺序优先尝试；没有能放的（冷却/蓝量/条件/未实装）就退回普攻
-  let action = actorIsPlayer ? selectSkill(actor, ctx) : null;
+  const ctx = { allies, enemies: opponents, members: battleInfo.members, passedTurn: battleInfo.passedTurn };
+  // 玩家和怪物走同一套：技能页里启用的技能按顺序优先尝试，没有能放的（冷却/蓝量/条件/未实装）就退回普攻
+  let action = selectSkill(actor, ctx);
   const skillHelpers = {
     defenceOf: (unit) => Number(unit.status?.defencing?.level) || Number(unit.defence) || 0,
     finalDamage: battleFinalDamage
@@ -2902,14 +2907,17 @@ function resolveBattleTurn(room) {
     for (const item of effects.cooldowns || []) {
       emitRoomEvent(room, "battle:addColddown:success", { source, target: item.unit, skillId: item.skillId, colddown: item.colddown });
     }
-    // 施放成功才有技能经验：让技能页的等级/经验条真正会涨
-    const levelUps = grantSkillExp(actor, skill.id, SKILL_CAST_EXP);
-    if (levelUps > 0) {
-      emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${skill.name} 升到 ${actor.skills[skill.id].level} 级` });
-      appendBattleLog(room, "skillLevelUp", { source, skillId: skill.id, level: actor.skills[skill.id].level });
-    }
-    if (syncBattleSkillProgress(actor)) {
-      emitToPlayer(actor.uuid, "character:getSkills:success", normalizePlayerSkills(players.get(actor.uuid)));
+    // 施放成功才有技能经验：让技能页的等级/经验条真正会涨。
+    // 怪物没有技能页，加经验只会在房间里广播「升到 N 级」，所以只给玩家单位算。
+    if (actor.isPlayerUnit) {
+      const levelUps = grantSkillExp(actor, skill.id, SKILL_CAST_EXP);
+      if (levelUps > 0) {
+        emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${skill.name} 升到 ${actor.skills[skill.id].level} 级` });
+        appendBattleLog(room, "skillLevelUp", { source, skillId: skill.id, level: actor.skills[skill.id].level });
+      }
+      if (syncBattleSkillProgress(actor)) {
+        emitToPlayer(actor.uuid, "character:getSkills:success", normalizePlayerSkills(players.get(actor.uuid)));
+      }
     }
   } else {
     // 普攻选目标要认状态：潜行的人选不到、嘲讽优先打嘲讽来源、慌乱的人不分敌我
