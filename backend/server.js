@@ -1609,6 +1609,35 @@ io.use((socket, next) => {
   next();
 });
 
+// ---- 属性面板明细（statusDetail）----
+// 前端 StatusCard（角色→属性）的契约（index-CnYosZ2K.js 约 825500 起）：
+//   statusDetail = { level, currentExp, final, fromWorkEquipment, fromEquipment,
+//                    fromSkillTreeNode, fromAffix, fromTitle{}, fromInactiveTitle{}, fromOther{} }
+//   a = final ?? level                      → 主卡显示 Lv.a
+//   final !== level 时额外显示 `(level +N)` → 绿/红
+//   「详细信息」按字段名逐行：基础等级 / 生活装备 / 战斗装备 / 专精 / 祝福 / 称号 / 其他加成
+// 只发 {level, currentExp} 的话这些分支永远进不去，玩家看到的就是「穿了装备属性没变」。
+// 注意：这里只算「显示值」，战斗内仍然是 makeBattleUnit() 自己叠 equipmentEffects，别让它读这份。
+function statusDetailFor(player) {
+  const base = getPlayerStatus(player);
+  const battleBonus = equipmentEffects(player, "battle").bonus;
+  const workBonus = equipmentEffects(player, "work").bonus;
+  const detail = {};
+  for (const key of statusKeys) {
+    const entry = base[key];
+    const fromEquipment = Number(battleBonus[key]) || 0;
+    const fromWorkEquipment = Number(workBonus[key]) || 0;
+    // 和战斗内一致：属性最低 1，装备的负数（铁甲衣 dexterity-2）不能把面板顶成负数
+    const final = Math.max(1, roundOneDecimal(entry.level + fromEquipment + fromWorkEquipment));
+    const row = { level: entry.level, currentExp: entry.currentExp, final };
+    // 为 0 的字段不发：前端用 `statusDetail.fromEquipment ? ...` 判断是否渲染该行
+    if (fromWorkEquipment) row.fromWorkEquipment = roundOneDecimal(fromWorkEquipment);
+    if (fromEquipment) row.fromEquipment = roundOneDecimal(fromEquipment);
+    detail[key] = row;
+  }
+  return detail;
+}
+
 function characterInitData(player) {
   const currentBattleRoom = getBattleRoom(player.currentBattleRoomId);
   return {
@@ -1626,7 +1655,8 @@ function characterInitData(player) {
     // 前端只判断 building[type].status === "BUILT"（其他状态位是公共建筑 villageBuilding 用的另一套）
     building: player.building || {},
     kittyFurniture: {},
-    status: getPlayerStatus(player),
+    // 属性面板要的是「基础等级 + 装备加成」明细，不是裸 status（见 statusDetailFor）
+    status: statusDetailFor(player),
     guild: {},
     userStyle: { currentAvatarBorder: null },
     // 前端以数组消费：FarmingPlotCard 用 .some(e => e.type === "kittyHomeServiceCenter" && e.level >= 2)
@@ -3665,6 +3695,9 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:equip:success", { equipment: result.equipment, info: { resourceId } });
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+      // 属性面板（角色→属性）只在收到 dispatchCharacterStatusInfo 时刷新，
+      // 战斗装备改力量/敏捷/攻击、生活装备改幸运，都要立刻推一份新的明细。
+      emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(socket.player).status);
       // 生活装备带 actionDurationEffect / resourceRequirementModifyEffect：
       // 立刻重算已排队任务的时长并推给前端；带这类修正的装备还要重发初始数据，
       // 让前端的「⏰ 预计完成 / 😋 饱食度」模型跟着变（前端只在 characterInitData 里更新它们）。
@@ -3690,6 +3723,7 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:unequip:success", result.equipment);
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
+      emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(socket.player).status);
       if (result.type === "work") {
         if (refreshWorkTaskDurations(socket.player)) {
           dispatchTaskQueue(socket);
@@ -3714,6 +3748,13 @@ io.on("connection", (socket) => {
       // 名字/头像变了，房间成员列表要跟着刷
       const room = getBattleRoom(socket.player.currentBattleRoomId);
       if (room) emitRoomUpdate(room);
+      return;
+    }
+    if (event === "requestCharacterStatusInfo") {
+      // 「角色→属性」面板挂载时要一次最新明细。前端没有 requestCharacterStatusInfo:success
+      // 的监听者，唯一的更新通道是 dispatchCharacterStatusInfo（index-CnYosZ2K.js 约 463268
+      // 里 U.value = e，整包替换 characterStatusInfo）。
+      emitGameEvent(socket, "dispatchCharacterStatusInfo", characterInitData(socket.player).status);
       return;
     }
     if (event.startsWith("farm:") && handleFarmEvent(socket, event, data)) return;
