@@ -457,6 +457,13 @@ function loadPersistentState() {
           farmPlots: Array.isArray(saved.farmPlots) ? saved.farmPlots : player.farmPlots
         });
         if (player.inventory?.gold?.count === undefined) setGoldCount(player, player.resources?.gold || 0);
+        // 老存档可能残留「资源不足自动暂停」的任务：饱食度这条已改成直接结束，
+        // 先把自动暂停解开，交给 runTaskQueue 按新规则处理（材料不足的会再暂停一次，无副作用）
+        for (const task of player.taskQueue) {
+          if (task?.pauseReason !== "insufficient_resource") continue;
+          task.paused = false;
+          task.pauseReason = null;
+        }
       }
     }
     if (fs.existsSync(marketDataFile)) {
@@ -3115,6 +3122,20 @@ function runTaskQueue(socket) {
   }
   const requirementError = consumeTaskRequirements(player, task.actionId);
   if (requirementError) {
+    // 饱食度是每个生活动作的固定消耗，等不到补充就会永远卡在队首（前端也没有暂停原因提示，
+    // 表现就是队列不动）。这种情况直接结束这一项，让队列继续往下走。
+    // 其它材料不足仍保持暂停：玩家补货后能自动接上，不需要重新排任务。
+    if (requirementError.resourceId === "__satiety") {
+      player.taskQueue.shift();
+      console.log(`[task] ${player.name || player.uuid} 饱食度不足（需要 ${requirementError.required}，持有 ${requirementError.available}），结束任务 ${task.actionId}`);
+      emitGameEvent(socket, "needResetCurrentActionProgress", null);
+      if (player.taskQueue[0]) player.taskQueue[0].lastSubtaskDoneTime = now;
+      dispatchTaskQueue(socket);
+      schedulePersist();
+      if (player.taskQueue.length) runner.timer = setTimeout(() => runTaskQueue(socket), 0);
+      else stopTaskRunner(player);
+      return;
+    }
     task.paused = true;
     task.pauseReason = "insufficient_resource";
     task.lastSubtaskDoneTime = now;
