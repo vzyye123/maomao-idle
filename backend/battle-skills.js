@@ -20,8 +20,14 @@ const SKILLS = skillCatalog.skills;
 
 const SELF_STATS = ["attacking", "defencing", "strength", "stamina", "intelligence", "dexterity", "battle", "luck"];
 const TARGET_STATS = SELF_STATS.map((key) => "target" + key[0].toUpperCase() + key.slice(1));
+// 生活等级（采集/缝纫/锻造/畜牧…）：生活技能书里的算式直接把它当数值用
+// （参考站写在 unit.status.otherStatus.<key>.level，本地的 status 是平的，两种形态都兼容）
+const LIFE_STATS = [
+  "collecting", "cooking", "enhance", "exploring", "farmingAnimal", "farmingPlant", "fishing",
+  "forging", "knowledge", "manufacturing", "mining", "mysterious", "sewing", "trading"
+];
 const SCOPE_KEYS = [
-  ...SELF_STATS, ...TARGET_STATS,
+  ...SELF_STATS, ...TARGET_STATS, ...LIFE_STATS,
   "level", "maxHp", "maxMp", "hp", "mp",
   "targetMaxHp", "targetHp", "targetHpLossRatio", "targetCount"
 ];
@@ -62,11 +68,13 @@ const SILENCING_STATES = new Set(["silence", "skillSeal"]);
 const DEBUFF_STATES = new Set([
   "curse", "poison", "burn", "despair", "armorBreak", "fluster", "taunt", "silence", "skillSeal",
   "stun", "frozen", "sleep", "paralysis", "petrify", "banished", "shadowStrike", "painAmplified",
-  "lastWord", "dragonRoarDebuff", "fishmanSkillSource"
+  "lastWord", "dragonRoarDebuff", "fishmanSkillSource", "bleeding", "irrevocable"
 ]);
 const BUFF_STATES = new Set([
   "atkUp", "defUp", "shield", "ironWall", "astralBarrier", "sneak", "regen", "bless", "selfHeal",
-  "boneShield", "demonicRage", "lastStand"
+  "boneShield", "demonicRage", "lastStand", "natureGift", "enhanceEmpowerState",
+  "sowMelonsReapMelonsRegen", "sowMelonsReapMelonsColddown", "sowMelonsReapMelonsLuck",
+  "knowledgeInspirationState"
 ]);
 
 const STATE_LABELS = {
@@ -98,7 +106,15 @@ const STATE_LABELS = {
   painAmplified: "痛苦放大",
   selfHeal: "自我疗愈",
   lastWord: "遗言",
-  taunt: "嘲讽"
+  taunt: "嘲讽",
+  bleeding: "流血",
+  irrevocable: "不可复活",
+  natureGift: "自然时运",
+  enhanceEmpowerState: "强化赋能",
+  knowledgeInspirationState: "知识启迪",
+  sowMelonsReapMelonsRegen: "种瓜得瓜(状态恢复)",
+  sowMelonsReapMelonsColddown: "种瓜得瓜(重置冷却)",
+  sowMelonsReapMelonsLuck: "得瓜"
 };
 
 export function stateLabel(stateId) {
@@ -128,7 +144,20 @@ const STATE_DEFS = {
   sneak: { untargetable: true },
   fluster: { confused: true },
   taunt: { taunt: true },
-  shield: {}
+  shield: {},
+  // 流血：每层每回合掉「当前生命 5%」，上限是施加者力量*300%，无视防御
+  bleeding: { turnStartPercentCurrentHp: 0.05, damageCapFromCasterStrength: 3 },
+  // 被「吞噬天地」打死的单位不能再被复活
+  irrevocable: { forbidRevive: true },
+  // 纯标记：自然时运只影响掉落率，知识启迪只是「4 回合内不再吃冷却缩减」的免疫标记
+  natureGift: {},
+  knowledgeInspirationState: {},
+  // 强化赋能：把 actualValue 加到「当前最高属性」上（参考站按 extra.mainStatus 走）
+  enhanceEmpowerState: { statKeyFromRecord: true },
+  // 种瓜得瓜的三个状态都在「到期」时结算：恢复一半已损失生命/魔法、清空技能冷却、加 4 幸运
+  sowMelonsReapMelonsRegen: { detachHealMissingRatio: 0.5 },
+  sowMelonsReapMelonsColddown: { detachClearCooldown: true },
+  sowMelonsReapMelonsLuck: { stat: { luck: 1 }, defaultValue: 4 }
 };
 
 function stateEntries(unit) {
@@ -190,10 +219,20 @@ function applyStateAttach(unit, stateId, record) {
       record.appliedStats.defencing = (record.appliedStats.defencing || 0) - current;
     }
   }
+  // 加在「动态属性」上的状态（强化赋能：施放时已经算好是力量还是敏捷/智力）
+  if (def.statKeyFromRecord) {
+    const key = record.mainStatus || "strength";
+    const strength = Number(record.actualValue ?? def.defaultValue ?? 0) || 0;
+    if (strength) {
+      const bucket = statBucket(unit, key);
+      bucket.level = roundOne(Number(bucket.level) + strength);
+      record.appliedStats[key] = strength;
+    }
+  }
   if (def.damageCapTimes) record.remainingTimes = def.damageCapTimes;
 }
 
-function applyStateDetach(unit, stateId, record) {
+function applyStateDetach(unit, stateId, record, out = null) {
   const def = STATE_DEFS[stateId];
   if (!def) return;
   for (const [key, delta] of Object.entries(record.appliedStats || {})) {
@@ -201,13 +240,37 @@ function applyStateDetach(unit, stateId, record) {
     bucket.level = roundOne(Number(bucket.level) - Number(delta));
   }
   record.appliedStats = {};
+  // 到期才结算的效果（参考站写在 onDetach 里）：
+  // 种瓜得瓜·恢复 → 补一半已损失的生命与魔法；种瓜得瓜·重置冷却 → 清空技能冷却
+  if (def.detachHealMissingRatio && out) {
+    const ratio = Number(def.detachHealMissingRatio) || 0;
+    const missingHp = Math.max(0, (Number(unit.maxHp) || 0) - (Number(unit.hp) || 0));
+    const missingMp = Math.max(0, (Number(unit.maxMp) || 0) - (Number(unit.mp) || 0));
+    const healHp = Math.min(missingHp, Math.floor(missingHp * ratio));
+    const healMp = Math.min(missingMp, Math.floor(missingMp * ratio));
+    if (healHp > 0) {
+      unit.hp = (Number(unit.hp) || 0) + healHp;
+      out.heal.push({ unit: unit.uuid, value: healHp, stateId });
+    }
+    if (healMp > 0) {
+      unit.mp = (Number(unit.mp) || 0) + healMp;
+      out.mpRestore.push({ unit: unit.uuid, value: healMp, stateId });
+    }
+  }
+  if (def.detachClearCooldown && out) {
+    if (unit.skillColddown && Object.keys(unit.skillColddown).length) {
+      unit.skillColddown = {};
+      out.cooldowns.push({ unit: unit.uuid, stateId });
+    }
+  }
 }
 
 /**
  * 回合开始给单位结算状态：剩余回合 -1，到 0 就摘掉（摘掉时把属性还原）。
  * 返回被摘掉的状态 id，供调用方决定是否推送事件。
+ * out（可选）会被填入「到期才结算」的效果：{ heal: [], mpRestore: [], cooldowns: [] }
  */
-export function tickStates(unit) {
+export function tickStates(unit, out = null) {
   const expired = [];
   for (const [id, value] of stateEntries(unit)) {
     if (!value || typeof value !== "object") {
@@ -219,7 +282,7 @@ export function tickStates(unit) {
     if (!Number.isFinite(remaining)) continue;
     const next = remaining - 1;
     if (next <= 0) {
-      applyStateDetach(unit, id, value);
+      applyStateDetach(unit, id, value, out);
       delete unit.state[id];
       expired.push(id);
     } else {
@@ -284,6 +347,20 @@ export function applyStateTurnStart(unit, ctx = {}) {
       const value = Math.max(1, Math.floor((Number(unit.maxHp) || 0) * def.turnStartPercentMaxHp));
       unit.hp = Math.max(0, unit.hp - value);
       out.damage.push({ unit: unit.uuid, value, stateId: id, damageType: "magical", sourceUnitUuid: record.sourceUnitUuid });
+    }
+    // 流血：每层按「当前生命」比例掉血，上限是施加者力量*300%（参考站 bleeding）
+    if (def.turnStartPercentCurrentHp) {
+      const ratio = Number(def.turnStartPercentCurrentHp) || 0;
+      const stacks = Math.max(1, Number(record.stack) || 1);
+      let value = Math.floor((Number(unit.hp) || 0) * ratio * stacks);
+      if (def.damageCapFromCasterStrength) {
+        const caster = members.find((item) => item.uuid === record.sourceUnitUuid);
+        const cap = Math.floor(unitStat(caster || unit, "strength") * def.damageCapFromCasterStrength);
+        value = Math.min(value, cap);
+      }
+      if (value <= 0) continue;
+      unit.hp = Math.max(0, unit.hp - value);
+      out.damage.push({ unit: unit.uuid, value, stateId: id, damageType: "physical", sourceUnitUuid: record.sourceUnitUuid });
     }
     if (def.turnStartHeal) {
       const value = Math.max(0, Math.floor(Number(record.actualValue) || 0));
@@ -352,9 +429,11 @@ export function pickTargets(def, unit, ctx) {
     case "single_random_ally":
     case "single_ally": {
       // 复活要选「已经倒下」的友军；没人倒下就别放（否则只是白占一回合）
+      // 「不可复活」（吞噬天地打死的）也要跳过
       if ((def.types || []).includes("Revive")) {
         const dead = (ctx.members || ctx.allies || [])
-          .filter((item) => !(item.hp > 0) && Boolean(item.isPlayerUnit) === Boolean(unit.isPlayerUnit));
+          .filter((item) => !(item.hp > 0) && !item.state?.irrevocable
+            && Boolean(item.isPlayerUnit) === Boolean(unit.isPlayerUnit));
         return dead.length ? [pickRandom(dead)] : [];
       }
       const target = pickRandom(allies);
@@ -537,6 +616,15 @@ function unitStat(unit, key) {
   return Number(value) || (Number(unit?.[key]) || 1);
 }
 
+// 生活等级：缺省 1（参考站写的是 `??1`）。没练过的号也有一条基准线，算式不会除零
+function lifeLevel(unit, key) {
+  const status = unit?.status || {};
+  const flat = Number(status[key]?.level);
+  if (Number.isFinite(flat) && flat > 0) return flat;
+  const nested = Number(status.otherStatus?.[key]?.level ?? unit?.otherStatus?.[key]?.level);
+  return Number.isFinite(nested) && nested > 0 ? nested : 1;
+}
+
 function valueScope(unit, target, level, targetCount) {
   const scope = {
     level,
@@ -551,6 +639,7 @@ function valueScope(unit, target, level, targetCount) {
   };
   for (const key of SELF_STATS) scope[key] = unitStat(unit, key);
   for (const key of SELF_STATS) scope["target" + key[0].toUpperCase() + key.slice(1)] = unitStat(target, key);
+  for (const key of LIFE_STATS) scope[key] = lifeLevel(unit, key);
   return scope;
 }
 
@@ -564,7 +653,11 @@ export function evalSkillExpr(unit, expr, target, targetCount = 1, skillId = nul
   try {
     const raw = fn(...SCOPE_KEYS.map((key) => scope[key]));
     const value = Number(raw);
-    return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    if (!Number.isFinite(value)) return 0;
+    // 状态强度可能是百分比小数（自然时运 0.024、爆炒-酸 0.01…），不能一律取整，
+    // 否则这些状态会变成 0。伤害/治疗都远大于 1，取整行为不受影响。
+    const clamped = Math.max(0, value);
+    return clamped >= 1 ? Math.floor(clamped) : Math.round(clamped * 10000) / 10000;
   } catch {
     return 0;
   }
@@ -582,6 +675,20 @@ function hasAnyState(unit, family) {
 
 function damageEntry(raw, extra = {}) {
   return { raw: Math.max(0, Math.floor(Number(raw) || 0)), ...extra };
+}
+
+// 迷雾幽灵攻击：所有单位（含友军）按比例流失生命，最低留 1 点。
+// 参考站直接改 hp，不走伤害结算；这里走 damage 通道，实际扣血被限制在「当前生命 -1」。
+function ghostDrain(ctx, ratio, basis) {
+  const members = [...(ctx.allies || []), ...(ctx.enemies || [])].filter((item) => item.hp > 0);
+  const damage = {};
+  for (const member of members) {
+    const base = basis === "max" ? Number(member.maxHp) || 0 : Number(member.hp) || 0;
+    const raw = Math.max(1, Math.floor(base * ratio));
+    if (raw <= 0) continue;
+    damage[member.uuid] = damageEntry(Math.min(raw, Math.max(0, (Number(member.hp) || 0) - 1)));
+  }
+  return { damage };
 }
 
 const SKILL_HANDLERS = {
@@ -726,6 +833,140 @@ const SKILL_HANDLERS = {
     if (!target) return { skipCast: true };
     addUnitState(target, "fluster", 3, { sourceUnitUuid: unit.uuid });
     return { states: [{ unit: target.uuid, stateId: "fluster", duration: 3 }] };
+  },
+
+  // 穿针引线：按行动顺序依次打所有敌人，每命中一个后续伤害 -5%，无视防御
+  threadingNeedle(unit, skill, targets, helpers, ctx) {
+    const enemies = (ctx.enemies || []).filter((item) => item.hp > 0);
+    if (!enemies.length) return { skipCast: true };
+    const level = Math.max(1, Number(unit.skills?.threadingNeedle?.level) || 1);
+    let raw = Math.floor(10 + unitStat(unit, "attacking") * (0.6 + 0.02 * level)
+      + lifeLevel(unit, "sewing") * (3.5 + 0.02 * level));
+    const step = Math.floor(raw * 0.05);
+    // ctx 里没有 turnOrder，用敏捷降序近似「行动顺序」
+    const ordered = [...enemies].sort((left, right) => unitStat(right, "dexterity") - unitStat(left, "dexterity"));
+    const damage = {};
+    for (const enemy of ordered) {
+      damage[enemy.uuid] = damageEntry(raw, { damageType: "physical", ignoreDefence: true });
+      raw = Math.max(1, raw - step);
+    }
+    return { damage };
+  },
+
+  // 知识启迪：全体回蓝 + 减技能冷却；同一单位 4 回合内只吃一次（用状态当免疫标记）
+  knowledgeInspiration(unit, skill, targets, helpers, ctx) {
+    const allies = (ctx.allies || []).filter((item) => item.hp > 0);
+    if (!allies.length) return { skipCast: true };
+    const level = Math.max(1, Number(unit.skills?.knowledgeInspiration?.level) || 1);
+    const knowledge = lifeLevel(unit, "knowledge");
+    const amount = Math.floor(10 + knowledge * (0.4 + 0.01 * level));
+    const reduce = 1 + Math.floor(0.034 * knowledge);
+    const mp = {};
+    const states = [];
+    for (const ally of allies) {
+      const max = Number(ally.maxMp) || 0;
+      const gained = Math.max(0, Math.min(max - (Number(ally.mp) || 0), amount));
+      if (gained > 0) {
+        ally.mp = (Number(ally.mp) || 0) + gained;
+        mp[ally.uuid] = gained;
+      }
+      if (reduce <= 0 || ally.state?.knowledgeInspirationState) continue;
+      // 「知识启迪」自己不吃冷却缩减（参考站显式排除）
+      for (const id of Object.keys(ally.skillColddown || {})) {
+        if (id === "knowledgeInspiration") continue;
+        const left = Number(ally.skillColddown[id]) || 0;
+        if (left <= 0) continue;
+        ally.skillColddown[id] = Math.max(0, left - reduce);
+      }
+      addUnitState(ally, "knowledgeInspirationState", 4, { sourceUnitUuid: unit.uuid, actualValue: reduce });
+      states.push({ unit: ally.uuid, stateId: "knowledgeInspirationState", duration: 4, actualValue: reduce });
+    }
+    return { mp, states };
+  },
+
+  // 种瓜得瓜：随机给 N 个「身上没有那三个状态」的友军挂上其中一个（恢复 / 重置冷却 / 得瓜）
+  sowMelonsReapMelons(unit, skill, targets, helpers, ctx) {
+    const marks = ["sowMelonsReapMelonsRegen", "sowMelonsReapMelonsColddown", "sowMelonsReapMelonsLuck"];
+    const pool = (ctx.allies || []).filter((item) => item.hp > 0 && marks.every((id) => !item.state?.[id]));
+    if (!pool.length) return { skipCast: true };
+    const count = Math.min(pool.length, Math.max(1, Math.floor(1 + 0.1 * lifeLevel(unit, "farmingPlant"))));
+    const picked = [];
+    const candidates = [...pool];
+    for (let index = 0; index < count; index += 1) {
+      const [chosen] = candidates.splice(Math.floor(Math.random() * candidates.length), 1);
+      if (!chosen) break;
+      picked.push(chosen);
+    }
+    const level = Math.max(1, Number(unit.skills?.sowMelonsReapMelons?.level) || 1);
+    const states = [];
+    for (const ally of picked) {
+      const stateId = pickRandom(marks);
+      addUnitState(ally, stateId, 4, { sourceUnitUuid: unit.uuid });
+      states.push({ unit: ally.uuid, stateId, duration: 4 });
+    }
+    // 每成功施加一个就给自己一份随机生活经验（参考站：1 + 技能等级*5%，每多一个 +1）
+    const lifeExp = picked.length
+      ? { status: pickRandom(["collecting", "mining", "fishing", "farmingAnimal", "farmingPlant"]), amount: (1 + 0.05 * level) + (picked.length - 1) }
+      : null;
+    return { states, lifeExp };
+  },
+
+  // 强化赋能：给「没有强化赋能、也不是召唤物」的友军加主属性。
+  // 参考站挑的是「装备强化总等级最高」的友军，本地没有装备强化系统，按阵容顺序取第一个。
+  enhanceEmpower(unit, skill, targets, helpers, ctx) {
+    const candidates = (ctx.allies || []).filter((item) => item.hp > 0 && !item.isSummoned && !item.state?.enhanceEmpowerState);
+    if (!candidates.length) return { skipCast: true };
+    const target = candidates[0];
+    const level = Math.max(1, Number(unit.skills?.enhanceEmpower?.level) || 1);
+    const value = Math.floor(0.2 * lifeLevel(unit, "enhance") + 0.3 * level);
+    if (value <= 0) return { skipCast: true };
+    const main = ["strength", "dexterity", "intelligence"]
+      .reduce((best, key) => (unitStat(target, key) > unitStat(target, best) ? key : best), "strength");
+    addUnitState(target, "enhanceEmpowerState", 5, { sourceUnitUuid: unit.uuid, actualValue: value, mainStatus: main });
+    return { states: [{ unit: target.uuid, stateId: "enhanceEmpowerState", duration: 5, actualValue: value }] };
+  },
+
+  // 强化冲击：智力不低于力量/敏捷时打魔法，否则物理；
+  // 伤害 = 0.6*对应属性 + 强化等级*(2 + 0.02*技能等级)，装备强化加成在本地恒为 0
+  enhanceStrike(unit, skill, targets, helpers, ctx) {
+    const enemies = (ctx.enemies || []).filter((item) => item.hp > 0);
+    if (!enemies.length) return { skipCast: true };
+    const level = Math.max(1, Number(unit.skills?.enhanceStrike?.level) || 1);
+    const intelligence = unitStat(unit, "intelligence");
+    const magical = intelligence >= unitStat(unit, "strength") && intelligence >= unitStat(unit, "dexterity");
+    const base = magical ? intelligence : unitStat(unit, "attacking");
+    const raw = Math.floor(0.6 * base + lifeLevel(unit, "enhance") * (2 + 0.02 * level));
+    const damage = {};
+    for (const enemy of enemies) {
+      damage[enemy.uuid] = damageEntry(raw, { damageType: magical ? "magical" : "physical" });
+    }
+    return { damage };
+  },
+
+  // 迷雾幽灵攻击：所有单位流失当前生命 5%（Boss 版是最大生命 25%）
+  denseFogSpriteAttack(unit, skill, targets, helpers, ctx) {
+    return ghostDrain(ctx, 0.05, "current");
+  },
+  denseFogSpriteAttackBoss(unit, skill, targets, helpers, ctx) {
+    return ghostDrain(ctx, 0.25, "max");
+  },
+
+  // 吞噬天地：打「当前生命比例最低」的敌人，400 + 已损失生命 95%，无视防御；
+  // 打死的单位挂「不可复活」（参考站在伤害结算之后判断，这里按扣血前的数值预估）
+  nianWorldSwallower(unit, skill, targets, helpers, ctx) {
+    const enemies = (ctx.enemies || []).filter((item) => item.hp > 0);
+    if (!enemies.length) return { skipCast: true };
+    const ratioOf = (item) => (Number(item.hp) || 0) / Math.max(1, Number(item.maxHp) || 1);
+    const target = enemies.reduce((best, item) => (ratioOf(item) < ratioOf(best) ? item : best), enemies[0]);
+    const lost = Math.max(0, (Number(target.maxHp) || 0) - (Number(target.hp) || 0));
+    const raw = Math.floor(400 + 0.95 * lost);
+    const states = [];
+    const afterShield = Math.max(0, raw - (Number(target.tmpShield) || 0));
+    if ((Number(target.hp) || 0) - afterShield <= 0 && !target.state?.irrevocable) {
+      addUnitState(target, "irrevocable", 99, { sourceUnitUuid: unit.uuid });
+      states.push({ unit: target.uuid, stateId: "irrevocable", duration: 99 });
+    }
+    return { damage: { [target.uuid]: damageEntry(raw, { damageType: "physical", ignoreDefence: true }) }, states };
   }
 };
 
@@ -760,6 +1001,9 @@ export function resolveSkillEffects(unit, action, helpers, aiCtx = {}) {
     damage: {},
     heal: {},
     shield: {},
+    // 回蓝 / 生活经验这类没有独立事件通道的效果，由手写 handler 填
+    mp: {},
+    lifeExp: null,
     states: [],
     removedStates: [],
     cooldowns: [],
@@ -813,6 +1057,13 @@ export function resolveSkillEffects(unit, action, helpers, aiCtx = {}) {
       const target = ctx.allies.find((item) => item.uuid === unitId) || unit;
       addShield(result, target, value);
     }
+    for (const [unitId, value] of Object.entries(patch.mp || {})) {
+      if (!(value > 0)) continue;
+      result.mp[unitId] = (result.mp[unitId] || 0) + Math.floor(value);
+    }
+    if (patch.lifeExp?.status && patch.lifeExp?.amount > 0) {
+      result.lifeExp = { status: patch.lifeExp.status, amount: patch.lifeExp.amount };
+    }
     for (const item of patch.states || []) result.states.push(item);
     for (const item of patch.removedStates || []) result.removedStates.push(item);
     for (const item of patch.cooldowns || []) result.cooldowns.push(item);
@@ -832,7 +1083,9 @@ function addDamage(result, target, raw, skill, helpers, options = {}) {
     : (helpers?.finalDamage ? helpers.finalDamage(raw, effectiveDefence) : Math.max(1, raw - effectiveDefence));
   const applied = applyIncomingDamage(target, final);
   const damageType = options.damageType || skill.damageType;
-  const bucket = result.damage[target.uuid] || { value: 0, fDamage: 0, damageType: damageType === "True" ? "true" : (damageType === "Magical" ? "magical" : "physical"), shieldDamage: 0 };
+  // 手写 handler 里写的是小写（magical/physical），catalog 里是大写（Magical/True），统一按小写比
+  const normalizedType = String(damageType || "").toLowerCase();
+  const bucket = result.damage[target.uuid] || { value: 0, fDamage: 0, damageType: normalizedType === "true" ? "true" : (normalizedType === "magical" ? "magical" : "physical"), shieldDamage: 0 };
   bucket.value += final;
   bucket.fDamage += applied.absorbedByShield ? 0 : applied.damage;
   bucket.shieldDamage += applied.absorbedByShield;

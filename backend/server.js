@@ -258,6 +258,12 @@ const itemUseEffects = (() => {
 })();
 const statusExperienceThresholds = [0, 20, 45, 80, 125, 180, 245, 320, 405, 500, 605, 720, 845, 980, 1125, 1280, 1445, 1620, 1805, 2000, 2205, 2420, 2645, 2880, 3125, 3380, 3645, 3920, 4205, 4500, 4805, 5760, 6825, 8000, 9285, 10680, 12185, 13800, 15525, 17360, 19305, 21360, 23525, 25800, 28185, 30680, 33285, 36000, 38825, 41760, 44805];
 const statusKeys = ["attacking", "battle", "collecting", "cooking", "defencing", "dexterity", "enhance", "exploring", "farmingAnimal", "farmingPlant", "fishing", "forging", "intelligence", "knowledge", "luck", "manufacturing", "mining", "mysterious", "sewing", "stamina", "strength", "trading"];
+// 生活属性中文名（技能给「生活经验」时弹提示用，名字取自参考站的属性表 Pa）
+const LIFE_STATUS_LABELS = {
+  collecting: "采集", cooking: "烹饪", enhance: "强化", exploring: "探索", farmingAnimal: "畜牧",
+  farmingPlant: "种植", fishing: "钓鱼", forging: "锻造", knowledge: "学识",
+  manufacturing: "制造", mining: "挖掘", mysterious: "神秘", sewing: "缝纫", trading: "交易"
+};
 
 // 参考站的等级经验是「当前等级内进度」：升到下一级需要 statusExperienceThresholds[level] 点，
 // 升级时扣除该门槛并清零重算（实测：Lv.22 2536/2645 → 升到 Lv.23 后 currentExp 变为 0 起的进度）。
@@ -2319,7 +2325,15 @@ function battleDropMultiplier(room) {
   const difficulty = battleDifficultyConfig(room);
   const difficultyBonus = 1 + (difficulty?.additionalDropPercent || 0);
   const sliderBonus = 1 + LOOT_GOLD_SLIDER_LOOT_STEP * battleLootGoldSlider(room);
-  return difficultyBonus * sliderBonus;
+  // 「自然时运」（自然馈赠挂的状态）按状态强度提升战利品掉落率：
+  // 参考站是每级采集 +0.08%，30 级采集 = +2.4%（×1.024）
+  const battleInfo = room.memberIds.map((uuid) => players.get(uuid)?.battleInfo).find(Boolean);
+  let giftBonus = 0;
+  for (const unit of battleInfo?.members || []) {
+    if (!(unit?.hp > 0)) continue;
+    giftBonus += Number(unit.state?.natureGift?.actualValue) || 0;
+  }
+  return difficultyBonus * sliderBonus * (1 + giftBonus);
 }
 
 // 金币获取比例：只有滑块会削减金币，难度不削减
@@ -2755,9 +2769,22 @@ function resolveBattleTurn(room) {
 
   const source = actor.uuid;
   // 自己的回合开始：先结算状态剩余回合，再让技能冷却 -1（和参考站的 turnStart 语义一致）
-  const expiredStates = tickStates(actor);
+  // detachEffects 收集「到期才结算」的效果（种瓜得瓜：恢复一半已损失生命/魔法、清空技能冷却）
+  const detachEffects = { heal: [], mpRestore: [], cooldowns: [] };
+  const expiredStates = tickStates(actor, detachEffects);
   for (const stateId of expiredStates) {
     emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${stateLabel(stateId)} 结束` });
+  }
+  for (const item of detachEffects.heal) {
+    emitRoomEvent(room, "battle:heal:success", { source, target: item.unit, value: item.value, reason: "state", stateId: item.stateId });
+    emitRoomEvent(room, "battle:floatText:success", { unit: item.unit, text: `+${item.value}` });
+  }
+  for (const item of detachEffects.mpRestore) {
+    emitRoomEvent(room, "battle:restoreMp:success", { target: item.unit, value: item.value });
+    emitRoomEvent(room, "battle:floatText:success", { unit: item.unit, text: `+${item.value} MP` });
+  }
+  for (const item of detachEffects.cooldowns) {
+    emitRoomEvent(room, "battle:floatText:success", { unit: item.unit, text: "技能冷却已重置" });
   }
   // 中毒/绝望在回合开始掉血，自我疗愈/再生回血 —— 结算完再决定这一回合还能不能行动
   const stateTick = applyStateTurnStart(actor, { members: battleInfo.members });
@@ -2877,6 +2904,11 @@ function resolveBattleTurn(room) {
       emitRoomEvent(room, "battle:heal:success", { source, target: unitId, value, reason: "skill", skillId: skill.id });
       emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `+${value}` });
     }
+    // 回蓝（知识启迪）：前端有 battle:restoreMp:success，用同一个事件
+    for (const [unitId, value] of Object.entries(effects.mp || {})) {
+      emitRoomEvent(room, "battle:restoreMp:success", { target: unitId, value });
+      emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `+${value} MP` });
+    }
     for (const [unitId, value] of Object.entries(effects.shield)) {
       emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `护盾 +${value}` });
       emitRoomEvent(room, "battle:addState:success", {
@@ -2917,6 +2949,18 @@ function resolveBattleTurn(room) {
       }
       if (syncBattleSkillProgress(actor)) {
         emitToPlayer(actor.uuid, "character:getSkills:success", normalizePlayerSkills(players.get(actor.uuid)));
+      }
+      // 生活经验（种瓜得瓜）：写回存档并刷新属性面板，否则前端看到的还是旧等级
+      if (effects.lifeExp) {
+        const battlePlayer = players.get(actor.uuid);
+        if (battlePlayer) {
+          const next = addStatusExp(battlePlayer, effects.lifeExp.status, effects.lifeExp.amount);
+          emitRoomEvent(room, "battle:floatText:success", {
+            unit: source,
+            text: `+${effects.lifeExp.amount} ${LIFE_STATUS_LABELS[effects.lifeExp.status] || effects.lifeExp.status} 经验`
+          });
+          emitToPlayer(actor.uuid, "dispatchCharacterStatusInfo", next);
+        }
       }
     }
   } else {
