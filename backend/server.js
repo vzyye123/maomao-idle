@@ -1546,8 +1546,8 @@ function characterInitData(player) {
     kittyInfo: player.kitty,
     currentBattleRoom: publicBattleRoom(currentBattleRoom),
     battleInfo: player.battleInfo || null,
-    allGameActionDurationDetail: {},
-    allGameActionResourceRequirementDetail: {},
+    allGameActionDurationDetail: actionDurationDetailFor(player),
+    allGameActionResourceRequirementDetail: actionResourceRequirementDetailFor(player),
     workEquipment: player.workEquipment || {},
     battleEquipment: player.battleEquipment || {},
     skills: { baseAttack: { level: 1, order: 0 } },
@@ -2430,8 +2430,38 @@ function getTaskRequirements(actionId) {
   return actionRequirements[actionId] || [];
 }
 
+// ---- 生活装备降低动作消耗 ----
+// 装备的效果写在资源表的 onEquip[].resourceRequirementModifyEffect 里：
+// `{resource:"__satiety", actionId:"woodcutting", decrease:1}`（采集戒指让 8 个采集动作少扣 1 饱食度）。
+// 只算生活栏位；`actionId` 支持具体动作或 `allXxxAction` 分组。结果夹到 0（不会倒贴资源）。
+function workRequirementModifier(player, actionId, resourceId) {
+  const slots = player?.workEquipment;
+  if (!slots || typeof slots !== "object" || Array.isArray(slots)) return 0;
+  let delta = 0;
+  for (const equipped of Object.values(slots)) {
+    const item = resourceCatalog[equipped];
+    if (!item) continue;
+    for (const effect of item.onEquip || []) {
+      for (const entry of effect?.resourceRequirementModifyEffect || []) {
+        if (String(entry?.resource || "") !== resourceId) continue;
+        if (!actionDurationMatches(String(entry?.actionId || ""), actionId)) continue;
+        delta += (Number(entry.increase) || 0) - (Number(entry.decrease) || 0);
+      }
+    }
+  }
+  return delta;
+}
+
+// 实际要扣的材料（含生活装备修正）
+function taskRequirementsFor(player, actionId) {
+  return getTaskRequirements(actionId).map((requirement) => ({
+    resourceId: requirement.resourceId,
+    count: Math.max(0, requirement.count + workRequirementModifier(player, actionId, requirement.resourceId))
+  }));
+}
+
 function taskRequirementError(player, actionId) {
-  for (const requirement of getTaskRequirements(actionId)) {
+  for (const requirement of taskRequirementsFor(player, actionId)) {
     if (getAssetCount(player, requirement.resourceId) < requirement.count) {
       return { resourceId: requirement.resourceId, required: requirement.count, available: getAssetCount(player, requirement.resourceId) };
     }
@@ -2440,9 +2470,10 @@ function taskRequirementError(player, actionId) {
 }
 
 function consumeTaskRequirements(player, actionId) {
+  const requirements = taskRequirementsFor(player, actionId);
   const error = taskRequirementError(player, actionId);
   if (error) return error;
-  for (const requirement of getTaskRequirements(actionId)) removeAsset(player, requirement.resourceId, requirement.count);
+  for (const requirement of requirements) if (requirement.count > 0) removeAsset(player, requirement.resourceId, requirement.count);
   return null;
 }
 
@@ -2535,6 +2566,38 @@ function refreshWorkTaskDurations(player, now = Date.now()) {
   return changed;
 }
 
+// 前端 `characterInitData.allGameActionDurationDetail` / `allGameActionResourceRequirementDetail`
+// 会被合并进它自己的时长/消耗模型（index bundle 10959），队列面板的「⏰ 预计完成」「😋 饱食度」
+// 和排任务弹窗的次数估算都读这两个模型，所以装备修正要从这里下发。
+//
+// 前端那边是「整包替换 + 用 bundle 自带基线补缺键」：
+//   y.value = e.allGameActionDurationDetail; for (const t of v(c)) y.value[t] || (y.value[t] = c[t]);
+// 所以只发被装备改动过的动作就够了，其余键会自动回退到基线。
+// 全量下发的话首包会从 ~3KB 涨到 ~130KB（389 个动作 + 386 条消耗表），没必要。
+function actionDurationDetailFor(player) {
+  const detail = {};
+  for (const [actionId, base] of Object.entries(actionDurationMs)) {
+    const final = taskDurationFor(player, actionId, base);
+    if (final === base) continue;
+    detail[actionId] = { base, final, fromEquipmentModify: final - base };
+  }
+  return detail;
+}
+
+function actionResourceRequirementDetailFor(player) {
+  const detail = {};
+  for (const [actionId, requirements] of Object.entries(actionRequirements)) {
+    const entries = requirements.map((requirement) => {
+      const base = requirement.count;
+      const final = Math.max(0, base + workRequirementModifier(player, actionId, requirement.resourceId));
+      return { resourceId: requirement.resourceId, base, final, fromEquipmentModify: final - base };
+    });
+    // 只有真被改动过才整条下发；同一动作的几个资源要一起发，否则前端会缺项
+    if (entries.some((entry) => entry.fromEquipmentModify)) detail[actionId] = entries;
+  }
+  return detail;
+}
+
 function makeTask(payload = {}, player = null) {
   const createTime = payload.createTime || Date.now();
   const suppliedDuration = Number(payload.duration);
@@ -2615,6 +2678,12 @@ function resolveEquipmentSlot(item, equipment) {
   if (!EQUIPMENT_EQUIP_PARTS.includes(equipPart)) return null;
   if (!EQUIPMENT_DECORATE_SLOTS.includes(equipPart)) return equipPart;
   return EQUIPMENT_DECORATE_SLOTS.find((slot) => !equipment[slot]) || equipPart;
+}
+
+// 只有带「耗时 / 消耗」修正的装备才会改动前端那两份动作模型，其它装备没必要重发整包初始数据
+function affectsActionDetail(item) {
+  if (!item) return false;
+  return (item.onEquip || []).some((effect) => effect?.actionDurationEffect?.length || effect?.resourceRequirementModifyEffect?.length);
 }
 
 function equipItem(player, resourceId, rawType) {
@@ -3465,11 +3534,18 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:equip:success", { equipment: result.equipment, info: { resourceId } });
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
-      // 生活装备带 actionDurationEffect：立刻重算已排队任务的时长并推给前端
-      if (result.type === "work" && refreshWorkTaskDurations(socket.player)) {
-        dispatchTaskQueue(socket);
-        startTaskRunner(socket);
-        schedulePersist();
+      // 生活装备带 actionDurationEffect / resourceRequirementModifyEffect：
+      // 立刻重算已排队任务的时长并推给前端；带这类修正的装备还要重发初始数据，
+      // 让前端的「⏰ 预计完成 / 😋 饱食度」模型跟着变（前端只在 characterInitData 里更新它们）。
+      if (result.type === "work") {
+        if (refreshWorkTaskDurations(socket.player)) {
+          dispatchTaskQueue(socket);
+          startTaskRunner(socket);
+          schedulePersist();
+        }
+        if (affectsActionDetail(resourceCatalog[resourceId]) || affectsActionDetail(resourceCatalog[result.replaced])) {
+          emitGameEvent(socket, "characterInitData", { data: characterInitData(socket.player) });
+        }
       }
       return;
     }
@@ -3483,10 +3559,15 @@ io.on("connection", (socket) => {
       emitGameEvent(socket, "effectAction:unequip:success", result.equipment);
       emitGameEvent(socket, "dispatchInventoryInfo", socket.player.inventory);
       emitGameEvent(socket, "inventoryUpdated", socket.player.inventory);
-      if (result.type === "work" && refreshWorkTaskDurations(socket.player)) {
-        dispatchTaskQueue(socket);
-        startTaskRunner(socket);
-        schedulePersist();
+      if (result.type === "work") {
+        if (refreshWorkTaskDurations(socket.player)) {
+          dispatchTaskQueue(socket);
+          startTaskRunner(socket);
+          schedulePersist();
+        }
+        if (affectsActionDetail(resourceCatalog[result.resourceId])) {
+          emitGameEvent(socket, "characterInitData", { data: characterInitData(socket.player) });
+        }
       }
       return;
     }
