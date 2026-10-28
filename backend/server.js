@@ -9,6 +9,15 @@ import express from "express";
 import { Server as SocketServer } from "socket.io";
 import { b as actionGroupCatalog, c as battleMonsterCatalog, f as farmingCatalog } from "../pulled-frontend/_nuxt/game-jresource-BuAYGK_i.js";
 import { a as resourceCatalog } from "../pulled-frontend/_nuxt/game-json-resources-C7HDgHOG.js";
+import {
+  grantSkillExp,
+  isIncapacitated,
+  resolveSkillEffects,
+  selectSkill,
+  skillExpToNext,
+  stateLabel,
+  tickStates
+} from "./battle-skills.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(__dirname, "..", "pulled-frontend");
@@ -1436,6 +1445,50 @@ app.post("/api/gm/players/:uuid/grant", requireGM, (req, res) => {
   return ok(res, { applied: plan, inventory: player.inventory, resources: player.resources });
 });
 
+// 后台直接给角色发技能 / 改技能等级（技能书只覆盖 12 个生活技能，战斗技能没有获取途径，靠这里补）
+app.post("/api/gm/players/:uuid/skills", requireGM, (req, res) => {
+  const player = players.get(req.params.uuid);
+  if (!player) return res.status(404).json({ code: 404, message: "玩家不存在" });
+  const raw = Array.isArray(req.body?.skills) ? req.body.skills : [req.body].filter(Boolean);
+  if (!raw.length) return res.status(400).json({ code: 400, message: "请提供要发放的技能" });
+  if (raw.length > 200) return res.status(400).json({ code: 400, message: "单次最多 200 条" });
+  const plan = [];
+  for (const entry of raw) {
+    const skillId = String(entry?.skillId ?? "").trim();
+    if (!skillId) return res.status(400).json({ code: 400, message: "技能 id 不能为空" });
+    const level = Math.floor(Number(entry?.level ?? 1));
+    if (!Number.isFinite(level) || level < 1 || level > 150) {
+      return res.status(400).json({ code: 400, message: `${skillId} 的等级必须在 1~150` });
+    }
+    plan.push({ skillId, level, enabled: entry?.enabled !== false });
+  }
+  const list = normalizePlayerSkills(player);
+  for (const { skillId, level, enabled } of plan) {
+    const existing = list.find((item) => item.skillId === skillId);
+    if (existing) {
+      existing.level = level;
+      existing.enabled = enabled;
+      if (existing.exp >= skillExpToNext(level)) existing.exp = 0;
+    } else {
+      list.push({
+        skillId,
+        level,
+        exp: 0,
+        enabled,
+        order: list.length,
+        logic: []
+      });
+    }
+  }
+  player.skillList = list;
+  schedulePersist();
+  gmLog("grantSkill", { player: player.name, uuid: player.uuid, skills: plan });
+  for (const socket of marketPlayerSockets(player.uuid)) {
+    emitGameEvent(socket, "character:getSkills:success", normalizePlayerSkills(player));
+  }
+  return ok(res, { applied: plan, skills: normalizePlayerSkills(player) });
+});
+
 // 强制下线：只断 socket，不清存档（重登立刻回来）
 app.post("/api/gm/players/:uuid/kick", requireGM, (req, res) => {
   const player = players.get(req.params.uuid);
@@ -2155,6 +2208,40 @@ function emitRoomEvent(room, event, payload) {
   }
 }
 
+// 每次成功施放技能给的经验。技能页面板显示「经验 x / pq[level]」，pq[1]=20，
+// 所以 7 次施放左右能升到 2 级，不至于一场战斗就满级。
+const SKILL_CAST_EXP = 3;
+
+function emitToPlayer(uuid, event, payload) {
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.player?.uuid === uuid) emitGameEvent(socket, event, payload);
+  }
+}
+
+// 战斗单位里的技能等级/经验是快照，升级后要写回玩家存档，否则下一场又会掉回 1 级
+function syncBattleSkillProgress(unit) {
+  const player = players.get(unit?.uuid);
+  if (!player || !unit?.skills) return false;
+  const list = normalizePlayerSkills(player);
+  let changed = false;
+  for (const entry of list) {
+    const state = unit.skills[entry.skillId];
+    if (!state) continue;
+    const level = Math.max(1, Math.floor(Number(state.level) || 1));
+    const exp = Math.max(0, Number(state.exp) || 0);
+    if (level !== entry.level || exp !== entry.exp) {
+      entry.level = level;
+      entry.exp = exp;
+      changed = true;
+    }
+  }
+  if (changed) {
+    player.skillList = list;
+    schedulePersist();
+  }
+  return changed;
+}
+
 // ---- 战斗数值换算（对照参考站 http://111.229.73.102:8080 实测 + 官方更新日志）----
 // 攻击力 = 力量 × 1.25（更新日志「每点力量提供 0.25 攻击力，仅战斗内显示加成」）+ 战斗等级 × 0.2
 // 防御力 = 耐力 + 战斗等级 × 0.2
@@ -2317,6 +2404,22 @@ function makeBattleUnit(player) {
     const current = battleStatus[key] || { level: 1 };
     battleStatus[key] = { ...current, level: roundOneDecimal((Number(current.level) || 1) + amount) };
   }
+  // 技能页启用的技能直接进战斗：skills 是前端战斗引擎认的对象形态 {id:{level,order,exp}}，
+  // skillOrder 决定施放优先级（就是技能页拖拽后的顺序），skillLogic 是自动释放逻辑。
+  // 只有 skill-catalog 里带可执行算式的技能才会被 selectSkill 选中，其余退回普攻。
+  const enabledSkills = playerSkills(player).filter((entry) => entry.enabled);
+  const battleSkills = {};
+  const skillOrder = [];
+  const skillLogic = {};
+  for (const entry of enabledSkills) {
+    battleSkills[entry.skillId] = { level: entry.level, order: entry.order, exp: entry.exp };
+    skillOrder.push(entry.skillId);
+    skillLogic[entry.skillId] = Array.isArray(entry.logic) ? entry.logic : [];
+  }
+  if (!battleSkills[SKILL_BASE_ID]) {
+    battleSkills[SKILL_BASE_ID] = { level: 1, order: 0, exp: 0 };
+    skillOrder.unshift(SKILL_BASE_ID);
+  }
   return {
     uuid: player.uuid,
     id: player.uuid,
@@ -2335,11 +2438,9 @@ function makeBattleUnit(player) {
     status: battleStatus,
     baseStatus: structuredClone(battleStatus),
     state: {},
-    // 战斗单位的 skills 是「对象」形态（resolveBattleTurn 只认 baseAttack），和技能页那份
-    // 数组（characterBattleSkill）不是一回事。技能页启用的技能暂不参与战斗：119 个技能的
-    // 效果引擎还没实现，塞进来前端会渲染出点了没反应的技能按钮。
-    skills: { baseAttack: { level: 1, order: 0 } },
-    skillOrder: ["baseAttack"],
+    skills: battleSkills,
+    skillOrder,
+    skillLogic,
     ai: {},
     skillColddown: {},
     equipment: { ...(player.battleEquipment || {}) },
@@ -2624,25 +2725,154 @@ function resolveBattleTurn(room) {
     }
   }
   if (!actor) return finishBattle(room, "PLAYER_LOSE");
-  const actorIsPlayer = actor.isPlayerUnit;
-  const targets = actorIsPlayer ? aliveEnemies : alivePlayers;
-  const target = targets[Math.floor(Math.random() * targets.length)];
-  if (!target) return;
-  const attack = Number(actor.status?.attacking?.level) || Number(actor.attack) || 5;
-  const defense = Number(target.status?.defencing?.level) || Number(target.defense) || 0;
-  // 参考站的普通攻击没有随机浮动：固定基础伤害，再按目标的防御减免结算
-  const damage = battleFinalDamage(attack, defense);
-  target.hp = Math.max(0, target.hp - damage);
+
   const source = actor.uuid;
-  const damagePayload = {
-    source,
-    type: "skill",
-    castSkillId: "baseAttack",
-    target: [{ unit: target.uuid, value: damage, fDamage: damage, remainingHp: target.hp, damageType: "physical", shieldDamage: 0, causeBy: {} }],
-    sourceUnitUuid: source,
-    targetUnitUuidList: [target.uuid],
-    damageType: "physical"
-  };
+  // 自己的回合开始：先结算状态剩余回合，再让技能冷却 -1（和参考站的 turnStart 语义一致）
+  const expiredStates = tickStates(actor);
+  for (const stateId of expiredStates) {
+    emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${stateLabel(stateId)} 结束` });
+  }
+  for (const skillId of Object.keys(actor.skillColddown || {})) {
+    const left = Number(actor.skillColddown[skillId]) || 0;
+    if (left <= 1) delete actor.skillColddown[skillId];
+    else actor.skillColddown[skillId] = left - 1;
+  }
+
+  const actorIsPlayer = actor.isPlayerUnit;
+  const allies = battleInfo.members.filter((unit) => Boolean(unit.isPlayerUnit) === actorIsPlayer && unit.hp > 0);
+  const opponents = actorIsPlayer ? aliveEnemies : alivePlayers;
+
+  emitRoomEvent(room, "battle:turnStart:success", { source });
+
+  // 控制类状态：本回合直接跳过（状态已在上面的 tickStates 里递减过）
+  if (isIncapacitated(actor)) {
+    emitRoomEvent(room, "battle:floatText:success", { unit: source, text: "无法行动" });
+    appendBattleLog(room, "turn", { source, skipped: true });
+    battleInfo.currentTurnIndex = (battleInfo.currentTurnIndex + 1) % Math.max(1, battleInfo.turnOrder.length);
+    if (battleInfo.currentTurnIndex === 0) battleInfo.passedTurn += 1;
+    emitRoomEvent(room, "battle:turnEnd:success", { source });
+    emitRoomEvent(room, "battle:update:success", battleInfo);
+    const skippedResult = battleInfo.members.some((unit) => unit.isPlayerUnit && unit.hp > 0)
+      ? battleInfo.members.some((unit) => !unit.isPlayerUnit && unit.hp > 0) ? null : "PLAYER_WIN"
+      : "PLAYER_LOSE";
+    if (skippedResult) return finishBattle(room, skippedResult);
+    const skipDelay = Math.max(500, Number(room.turnDurationMs) || 1800);
+    battleTimers.set(room.uuid, setTimeout(() => resolveBattleTurn(room), skipDelay));
+    return;
+  }
+
+  const ctx = { allies, enemies: opponents, passedTurn: battleInfo.passedTurn };
+  // 技能页里启用的技能按拖拽顺序优先尝试；没有能放的（冷却/蓝量/条件/未实装）就退回普攻
+  const action = actorIsPlayer ? selectSkill(actor, ctx) : null;
+
+  if (action) {
+    const { skill } = action;
+    actor.mp = Math.max(0, (Number(actor.mp) || 0) - skill.mpCost);
+    if (skill.mpCost > 0) {
+      emitRoomEvent(room, "battle:lossMp:success", { source, target: source, value: skill.mpCost });
+    }
+    if (skill.colddown > 0) {
+      actor.skillColddown = actor.skillColddown || {};
+      actor.skillColddown[skill.id] = skill.colddown + 1;
+    }
+    const effects = resolveSkillEffects(actor, action, {
+      defenceOf: (unit) => Number(unit.status?.defencing?.level) || Number(unit.defence) || 0,
+      finalDamage: battleFinalDamage
+    });
+    emitRoomEvent(room, "battle:castSkill:success", { source, skillId: skill.id, skillName: skill.name });
+
+    const targetPayload = [];
+    for (const [unitId, detail] of Object.entries(effects.damage)) {
+      targetPayload.push({
+        unit: unitId,
+        value: detail.value,
+        fDamage: detail.fDamage,
+        remainingHp: detail.remainingHp,
+        damageType: detail.damageType,
+        shieldDamage: detail.shieldDamage,
+        causeBy: { type: "skill", skillId: skill.id }
+      });
+      emitRoomEvent(room, "battle:drawLine:success", {
+        source,
+        target: unitId,
+        color: detail.damageType === "magical" ? "#409eff" : "#f56c6c"
+      });
+      emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `-${detail.value}` });
+    }
+    if (targetPayload.length) {
+      const payload = {
+        source,
+        type: "skill",
+        castSkillId: skill.id,
+        target: targetPayload,
+        sourceUnitUuid: source,
+        targetUnitUuidList: targetPayload.map((item) => item.unit),
+        damageType: targetPayload[0].damageType
+      };
+      appendBattleLog(room, "damage", { ...payload, damage: targetPayload });
+      emitRoomEvent(room, "battle:dealDamage:success", payload);
+    }
+    for (const [unitId, value] of Object.entries(effects.heal)) {
+      emitRoomEvent(room, "battle:heal:success", { source, target: unitId, value, reason: "skill", skillId: skill.id });
+      emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `+${value}` });
+    }
+    for (const [unitId, value] of Object.entries(effects.shield)) {
+      emitRoomEvent(room, "battle:floatText:success", { unit: unitId, text: `护盾 +${value}` });
+      emitRoomEvent(room, "battle:addState:success", {
+        source,
+        target: unitId,
+        stateId: "shield",
+        stateName: "护盾",
+        duration: 2,
+        actualValue: value
+      });
+    }
+    for (const state of effects.states) {
+      if (state.stateId === "shield") continue;
+      emitRoomEvent(room, "battle:addState:success", {
+        source,
+        target: state.unit,
+        stateId: state.stateId,
+        stateName: stateLabel(state.stateId),
+        duration: state.duration
+      });
+    }
+    // 施放成功才有技能经验：让技能页的等级/经验条真正会涨
+    const levelUps = grantSkillExp(actor, skill.id, SKILL_CAST_EXP);
+    if (levelUps > 0) {
+      emitRoomEvent(room, "battle:floatText:success", { unit: source, text: `${skill.name} 升到 ${actor.skills[skill.id].level} 级` });
+      appendBattleLog(room, "skillLevelUp", { source, skillId: skill.id, level: actor.skills[skill.id].level });
+    }
+    if (syncBattleSkillProgress(actor)) {
+      emitToPlayer(actor.uuid, "character:getSkills:success", normalizePlayerSkills(players.get(actor.uuid)));
+    }
+  } else {
+    const target = opponents[Math.floor(Math.random() * opponents.length)];
+    if (!target) return;
+    const attack = Number(actor.status?.attacking?.level) || Number(actor.attack) || 5;
+    const defense = Number(target.status?.defencing?.level) || Number(target.defense) || 0;
+    // 参考站的普通攻击没有随机浮动：固定基础伤害，再按目标的防御减免结算
+    const damage = battleFinalDamage(attack, defense);
+    const shield = Math.max(0, Number(target.tmpShield) || 0);
+    const absorbed = Math.min(shield, damage);
+    target.tmpShield = shield - absorbed;
+    target.hp = Math.max(0, target.hp - (damage - absorbed));
+    const damagePayload = {
+      source,
+      type: "skill",
+      castSkillId: "baseAttack",
+      target: [{ unit: target.uuid, value: damage, fDamage: damage - absorbed, remainingHp: target.hp, damageType: "physical", shieldDamage: absorbed, causeBy: {} }],
+      sourceUnitUuid: source,
+      targetUnitUuidList: [target.uuid],
+      damageType: "physical"
+    };
+    emitRoomEvent(room, "battle:castSkill:success", { source, skillId: "baseAttack", skillName: "普通攻击" });
+    appendBattleLog(room, "damage", { ...damagePayload, damage: damagePayload.target });
+    emitRoomEvent(room, "battle:dealDamage:success", damagePayload);
+    emitRoomEvent(room, "battle:drawLine:success", { source, target: target.uuid, color: "#f56c6c" });
+    emitRoomEvent(room, "battle:floatText:success", { unit: target.uuid, text: `-${damage}` });
+  }
+
   battleInfo.currentTurnIndex = (battleInfo.currentTurnIndex + 1) % Math.max(1, battleInfo.turnOrder.length);
   if (battleInfo.currentTurnIndex === 0) battleInfo.passedTurn += 1;
   // 回合开始回复：每 1 点耐力回复 0.1 生命，每 1 点智力回复 0.05 魔法（向下取整，参考站多数回合回复为 0）
@@ -2658,12 +2888,6 @@ function resolveBattleTurn(room) {
     if (hpRegen > 0) emitRoomEvent(room, "battle:heal:success", { source: unit.uuid, target: unit.uuid, value: hpRegen, reason: "turnRegen" });
     if (mpRegen > 0) emitRoomEvent(room, "battle:restoreMp:success", { target: unit.uuid, value: mpRegen });
   });
-  appendBattleLog(room, "damage", { ...damagePayload, damage: damagePayload.target });
-  emitRoomEvent(room, "battle:turnStart:success", { source });
-  emitRoomEvent(room, "battle:castSkill:success", { source, skillId: "baseAttack" });
-  emitRoomEvent(room, "battle:dealDamage:success", damagePayload);
-  emitRoomEvent(room, "battle:drawLine:success", { source, target: target.uuid, color: "#f56c6c" });
-  emitRoomEvent(room, "battle:floatText:success", { unit: target.uuid, text: `-${damage}` });
   emitRoomEvent(room, "battle:turnEnd:success", { source });
   emitRoomEvent(room, "battle:update:success", battleInfo);
 
