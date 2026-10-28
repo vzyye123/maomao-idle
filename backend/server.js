@@ -1379,7 +1379,12 @@ function gmGrantEntries(body) {
 }
 
 function gmKnownItem(resourceId) {
-  return resourceId === "gold" || resourceId === "food" || resourceCatalog[resourceId]?.id === resourceId;
+  if (resourceId === "gold" || resourceId === "food") return true;
+  if (resourceCatalog[resourceId]?.id === resourceId) return true;
+  // 69 本战斗技能书只出现在 game-jresource 的怪物掉落表里，lv1~lv4 通用技能书只出现在
+  // game-battle-skill 的 items 表里，两者都不在 resourceCatalog —— 不放行的话 GM 既发不了
+  // 也补不了（玩家从战斗掉落拿到却学不会时没法补偿）
+  return /SkillBook$/.test(resourceId);
 }
 
 app.get("/api/gm/catalog", requireGM, (_req, res) => {
@@ -1713,22 +1718,18 @@ function statusDetailFor(player) {
 // → 下发必须是「数组」，元素 { skillId, level, exp, enabled, order, logic }。
 // baseAttack 恒存在且不可禁用：前端 Base 卡片对 baseAttack 不渲染经验条、也不渲染启用/禁用按钮。
 const SKILL_BASE_ID = "baseAttack";
-// 技能书 → 技能 id（来自 game-json-resources 的 12 个 *SkillBook 条目，资源表里没有 onUse，
-// 真实站点应是用 learnBattleSkillEffect 学技能，这份数据被裁掉了，所以由后端补上语义）
-const SKILL_BOOK_TO_SKILL = {
-  groupShieldSkillBook: "groupShield",
-  threadingNeedleSkillBook: "threadingNeedle",
-  natureGiftSkillBook: "natureGift",
-  knowledgeInspirationSkillBook: "knowledgeInspiration",
-  sowMelonsReapMelonsSkillBook: "sowMelonsReapMelons",
-  enhanceEmpowerSkillBook: "enhanceEmpower",
-  enhanceStrikeSkillBook: "enhanceStrike",
-  fishmanSkillSkillBook: "fishmanSkill",
-  forgeSkillCraftTurretSkillBook: "forgeSkillCraftTurret",
-  forgeSkillCraftMeowColossusSkillBook: "forgeSkillCraftMeowColossus",
-  chefSkillSkillBook: "chefSkill",
-  beastpackRoarSkillBook: "beastpackRoar"
-};
+// 技能书 → 技能 id。不能写白名单：资源表里带 onUse 的 *SkillBook 只有 12 本，
+// 真正的大头（69 本战斗技能书）在 game-jresource 的怪物掉落表里（如 sweepSkillBook、
+// summonBerryBirdSkillBook，掉率 1%~5%），硬编码会漏掉它们 —— 表现就是「用了没反应」，
+// 书被扣掉但没有技能。凡是 `<skillId>SkillBook` 一律按「学会该技能」处理。
+// lv1SkillBook~lv4SkillBook 是通用「一级/二级技能书」素材，不绑具体技能，不走这条。
+function skillIdFromBook(itemId) {
+  const id = String(itemId || "");
+  if (!id.endsWith("SkillBook")) return null;
+  const skillId = id.slice(0, -"SkillBook".length);
+  if (!skillId || /^lv\d+$/i.test(skillId)) return null;
+  return skillId;
+}
 
 // logic 是「条件组数组」：组间 OR、组内 AND，前端 LogicEditor 单组时会摊平成 [...conds]、
 // 多组时是 [[...conds], ...]。后端不理解语义，只做深拷贝 + 尺寸上限，避免被塞爆存档。
@@ -3445,17 +3446,18 @@ function useItem(player, itemId, multiple) {
   const count = Math.max(1, Math.floor(Number(multiple) || 1));
   const item = player.inventory[itemId];
   if (!item || (Number(item.count) || 0) < count) return { error: "物品数量不足" };
-  // 技能书：资源表里的 12 个 *SkillBook 只有 id/name/userBuyCost，没有 onUse，
-  // 真实站点的 learnBattleSkillEffect 在这份数据里被裁掉了，所以由后端补语义。
+  // 技能书：前端「使用物品」按钮点完只会发 effectAction:useItem，
+  // 真正学技能要做在这里（前端技能页只认 character:getSkills:success）。
   // 一次只能学一本（学会了再用就没意义了）。
-  const learnedSkillId = SKILL_BOOK_TO_SKILL[itemId];
+  const learnedSkillId = skillIdFromBook(itemId);
   if (learnedSkillId) {
     const list = normalizePlayerSkills(player);
     if (list.some((entry) => entry.skillId === learnedSkillId)) return { error: "你已经学会该技能了" };
     list.push({ skillId: learnedSkillId, level: 1, exp: 0, enabled: true, order: list.length, logic: [] });
     player.skillList = list;
-    item.count -= 1;
-    if (item.count <= 0) delete player.inventory[itemId];
+    const left = (Number(item.count) || 0) - 1;
+    if (left <= 0) delete player.inventory[itemId];
+    else item.count = left;
     return { learnedSkill: learnedSkillId, consumed: 1 };
   }
   const gained = {};
@@ -4370,8 +4372,9 @@ io.on("connection", (socket) => {
       const gained = result.gained || {};
       if (Object.keys(gained).length) emitGameEvent(socket, "inventory:increase:success", gained);
       if (result.learnedSkill) {
-        // 学会新技能要让技能页立刻出现这张卡：store 只认 character:getSkills:success
-        emitGameEvent(socket, "character:getSkills:success", normalizePlayerSkills(socket.player));
+        // 学会新技能要让技能页立刻出现这张卡：store 只认 character:getSkills:success。
+        // 推到该玩家的所有 socket —— 手机和 PC 同时开着时，只有一端发 useItem 也要同步另一端。
+        emitToPlayer(socket.player.uuid, "character:getSkills:success", normalizePlayerSkills(socket.player));
       }
       emitGameEvent(socket, "effectAction:useItem:success", { itemId: data.itemId, multiple: Math.max(1, Math.floor(Number(data.multiple) || 1)), gained, learnedSkill: result.learnedSkill });
       schedulePersist();
